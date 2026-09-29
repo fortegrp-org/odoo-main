@@ -94,14 +94,6 @@ class Users(models.Model):
             for user in self
         } if log_portal_access else {}
 
-        previous_email_by_user = {}
-        if vals.get('email'):
-            previous_email_by_user = {
-                user: user.email
-                for user in self.filtered(lambda user: bool(email_normalize(user.email)))
-                if email_normalize(user.email) != email_normalize(vals['email'])
-            }
-
         write_res = super(Users, self).write(vals)
 
         # log a portal status change (manual tracking)
@@ -117,29 +109,6 @@ class Users(models.Model):
                         subtype_xmlid='mail.mt_note'
                     )
 
-        if 'login' in vals:
-            self._notify_security_setting_update(
-                _("Security Update: Login Changed"),
-                _("Your account login has been updated"),
-            )
-        if 'password' in vals:
-            self._notify_security_setting_update(
-                _("Security Update: Password Changed"),
-                _("Your account password has been updated"),
-            )
-        if 'email' in vals:
-            # when the email is modified, we want notify the previous address (and not the new one)
-            for user, previous_email in previous_email_by_user.items():
-                self._notify_security_setting_update(
-                    _("Security Update: Email Changed"),
-                    _(
-                        "Your account email has been changed from %(old_email)s to %(new_email)s.",
-                        old_email=previous_email,
-                        new_email=user.email,
-                    ),
-                    mail_values={'email_to': previous_email},
-                    suggest_password_reset=False,
-                )
         return write_res
 
     def action_archive(self):
