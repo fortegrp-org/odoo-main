@@ -86,29 +86,23 @@ class TestSwissQRCode(AccountTestInvoicingCommon):
         self.ch_qr_invoice.company_id.partner_id.country_id = self.env.ref('base.fr')
         self.ch_qr_invoice._generate_qr_code()
 
-    def test_swiss_qr_code_generation_draft_invoice(self):
+    def test_qr_code_generation_with_newlines(self):
+        """ Check that the generated QR removes newlines from field content, as newlines
+        shift the field content causing the submitted QR code to be rejected.
         """
-        When an invoice is in draft, it should be printable without the QR-code (the reference needed but the qr is not yet computed)
-        To approximate the initial flow action > print invoice, we make sure that the QR code is not generated.
-        If it is not, it won't be an issue further in the flow
-        """
-        move = self.env['account.move'].create({
-            'move_type': 'out_invoice',
-            'partner_id': self.partner_a.id,
-            'partner_bank_id': self.swiss_qr_iban.id,
-            'invoice_line_ids': [
-                Command.create({
-                    'quantity': 1,
-                    'price_unit': 100,
-                    'tax_ids': [],
-                })
-            ]
-        })
-        self._assign_partner_address(move.company_id.partner_id)
-        self._assign_partner_address(move.partner_id)
-        move.qr_code_method = 'ch_qr'
+        # add the address with a newline
+        self._assign_partner_address(self.ch_qr_invoice.company_id.partner_id)
+        self._assign_partner_address(self.ch_qr_invoice.partner_id)
+        self.ch_qr_invoice.partner_id.write({"street2": "123 \nStreet"})
 
-        self.assertIsNone(move._generate_qr_code(), "QR-code should not be generated.")
+        # generate the field values, instead of the QR image.
+        unstruct_ref = self.ch_qr_invoice.ref and self.ch_qr_invoice.ref or self.ch_qr_invoice.name
+        vals = self.ch_qr_invoice.partner_bank_id._build_qr_code_vals(
+            self.ch_qr_invoice.amount_residual, unstruct_ref, self.ch_qr_invoice.payment_reference,
+            self.ch_qr_invoice.currency_id, self.ch_qr_invoice.partner_id, self.ch_qr_invoice.qr_code_method)
+        value_list = self.ch_qr_invoice.partner_bank_id._get_qr_vals(**vals)
+
+        self.assertEqual(''.join(value_list).count('\n'), 0, "Each element of the Swiss QR-code must be contained on one line.")
 
     def test_ch_qr_code_detection(self):
         """ Checks Swiss QR-code auto-detection when no specific QR-method

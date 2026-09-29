@@ -177,6 +177,9 @@ class AccountMoveLine(models.Model):
     # === Tax fields === #
     tax_ids = fields.Many2many(
         comodel_name='account.tax',
+        relation='account_move_line_account_tax_rel',
+        column1='account_move_line_id',
+        column2='account_tax_id',
         string="Taxes",
         compute='_compute_tax_ids', store=True, readonly=False, precompute=True,
         context={'active_test': False},
@@ -309,6 +312,7 @@ class AccountMoveLine(models.Model):
         inverse='_inverse_product_id',
         ondelete='restrict',
         check_company=True,
+        index=True,
     )
     product_uom_id = fields.Many2one(
         comodel_name='uom.uom',
@@ -494,7 +498,9 @@ class AccountMoveLine(models.Model):
     def _compute_name(self):
         def get_name(line):
             values = []
-            if line.partner_id.lang:
+            if line.move_id.partner_id.lang:
+                product = line.product_id.with_context(lang=line.move_id.partner_id.lang)
+            elif line.partner_id.lang:
                 product = line.product_id.with_context(lang=line.partner_id.lang)
             else:
                 product = line.product_id
@@ -632,6 +638,7 @@ class AccountMoveLine(models.Model):
                     company_id=line.company_id.id,
                     partner_id=line.partner_id.id,
                     move_type=line.move_id.move_type,
+                    journal_id=line.journal_id.id,
                 )
                 if account_id:
                     line.account_id = account_id
@@ -717,14 +724,24 @@ class AccountMoveLine(models.Model):
         order_string = self.env.cr.mogrify(sql_order).decode()
         from_clause, where_clause, where_clause_params = query.get_sql()
         sql = """
-            SELECT account_move_line.id, SUM(account_move_line.balance) OVER (
-                ORDER BY %(order_by)s
-                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-            )
-            FROM %(from)s
-            WHERE %(where)s
-        """ % {'from': from_clause, 'where': where_clause or 'TRUE', 'order_by': order_string}
-        self.env.cr.execute(sql, where_clause_params)
+            SELECT aml.id, aml.cumulated_balance
+            FROM (
+                SELECT
+                    account_move_line.id,
+                    SUM(account_move_line.balance) OVER (
+                        ORDER BY %(order_by)s
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                    ) AS cumulated_balance
+                FROM %(from)s
+                WHERE %(where)s
+            ) aml
+            WHERE aml.id = ANY(%%s)
+        """ % {
+            'from': from_clause,
+            'where': where_clause or 'TRUE',
+            'order_by': order_string,
+        }
+        self.env.cr.execute(sql, where_clause_params + [self.ids])
         result = {r[0]: r[1] for r in self.env.cr.fetchall()}
         for record in self:
             record.cumulated_balance = result[record.id]
@@ -894,7 +911,7 @@ class AccountMoveLine(models.Model):
     @api.depends('product_id', 'product_uom_id')
     def _compute_tax_ids(self):
         for line in self:
-            if line.display_type in ('line_section', 'line_note', 'payment_term'):
+            if line.display_type in ('line_section', 'line_note', 'payment_term', 'cogs'):
                 continue
             # /!\ Don't remove existing taxes if there is no explicit taxes set on the account.
             if line.product_id or (line.display_type != 'discount' and (line.account_id.tax_ids or not line.tax_ids)):
@@ -1011,45 +1028,58 @@ class AccountMoveLine(models.Model):
             else:
                 line.discount_allocation_key = False
 
-    @api.depends('account_id', 'company_id', 'discount', 'price_unit', 'quantity', 'currency_rate')
+    @api.depends('account_id', 'company_id', 'price_unit', 'quantity', 'currency_rate', 'move_id.line_ids.discount', 'move_id.line_ids.analytic_distribution')
     def _compute_discount_allocation_needed(self):
+        line2discounted_amount = {
+            line: [
+                (line.account_id, amount),
+                (discount_allocation_account, -amount),
+            ]
+            for line in self.move_id.line_ids
+            if line.display_type == 'product'
+            and (discount_allocation_account := line.move_id._get_discount_allocation_account())
+            and line.account_id != discount_allocation_account
+            and (amount := line.currency_id.round(
+                line.move_id.direction_sign * line.quantity * line.price_unit * line.discount / 100
+            ))
+        }
+
+        distribution_totals = defaultdict(lambda: defaultdict(float))
+        for line, discounted_amounts in line2discounted_amount.items():
+            for account, amount in discounted_amounts:
+                for analytic_account_id, percentage in (line.analytic_distribution or {}).items():
+                    weighted_amount = amount * percentage / 100
+                    distribution_totals[frozendict({
+                        'move_id': line.move_id.id,
+                        'account_id': account.id,
+                        'currency_rate': line.currency_rate,
+                    })][analytic_account_id] += weighted_amount
+
         for line in self:
             line.discount_allocation_dirty = True
-            discount_allocation_account = line.move_id._get_discount_allocation_account()
-
-            if not discount_allocation_account or line.display_type != 'product' or line.currency_id.is_zero(line.discount):
+            if line not in line2discounted_amount:
                 line.discount_allocation_needed = False
                 continue
 
-            discounted_amount_currency = line.currency_id.round(line.move_id.direction_sign * line.quantity * line.price_unit * line.discount/100)
             discount_allocation_needed = {}
-            discount_allocation_needed_vals = discount_allocation_needed.setdefault(
-                frozendict({
-                    'account_id': line.account_id.id,
+            for account, amount in line2discounted_amount[line]:
+                key = frozendict({
                     'move_id': line.move_id.id,
+                    'account_id': account.id,
                     'currency_rate': line.currency_rate,
-                }),
-                {
+                })
+                dist = distribution_totals[key]
+                total = sum(dist.values()) or 1  # avoid division by zero
+                discount_allocation_needed[key] = frozendict({
                     'display_type': 'discount',
                     'name': _("Discount"),
-                    'amount_currency': 0.0,
-                },
-            )
-            discount_allocation_needed_vals['amount_currency'] += discounted_amount_currency
-            discount_allocation_needed_vals = discount_allocation_needed.setdefault(
-                frozendict({
-                    'move_id': line.move_id.id,
-                    'account_id': discount_allocation_account.id,
-                    'currency_rate': line.currency_rate,
-                }),
-                {
-                    'display_type': 'discount',
-                    'name': _("Discount"),
-                    'amount_currency': 0.0,
-                },
-            )
-            discount_allocation_needed_vals['amount_currency'] -= discounted_amount_currency
-            line.discount_allocation_needed = {k: frozendict(v) for k, v in discount_allocation_needed.items()}
+                    'amount_currency': amount,
+                    'analytic_distribution': {
+                        account_id: 100 * value / total
+                        for account_id, value in dist.items()
+                    }
+                })
+            line.discount_allocation_needed = discount_allocation_needed
 
     @api.depends('tax_ids', 'account_id', 'company_id')
     def _compute_epd_key(self):
@@ -1292,7 +1322,7 @@ class AccountMoveLine(models.Model):
 
     @api.constrains('account_id', 'tax_ids', 'tax_line_id', 'reconciled')
     def _check_off_balance(self):
-        for line in self:
+        for line in self.move_id.line_ids:
             if line.account_id.internal_group == 'off_balance':
                 if any(a.internal_group != line.account_id.internal_group for a in line.move_id.line_ids.account_id):
                     raise UserError(_('If you want to use "Off-Balance Sheet" accounts, all the accounts of the journal entry must be of this type'))
@@ -1577,6 +1607,7 @@ class AccountMoveLine(models.Model):
         move_container = {'records': moves}
         with moves._check_balanced(move_container),\
              ExitStack() as exit_stack,\
+             self.env.protecting(self.env['account.move']._get_protected_vals({}, moves)), \
              moves._sync_dynamic_lines(move_container),\
              self._sync_invoice(container):
             lines = super().create([self._sanitize_vals(vals) for vals in vals_list])
@@ -1603,7 +1634,6 @@ class AccountMoveLine(models.Model):
                         )
 
         lines.move_id._synchronize_business_models(['line_ids'])
-        lines._check_constrains_account_id_journal_id()
         return lines
 
     def write(self, vals):
@@ -1629,6 +1659,7 @@ class AccountMoveLine(models.Model):
 
         line_to_write = self
         vals = self._sanitize_vals(vals)
+        tax_lock_check_ids = []
         for line in self:
             if not any(self.env['account.move']._field_will_change(line, vals, field_name) for field_name in vals):
                 line_to_write -= line
@@ -1643,11 +1674,13 @@ class AccountMoveLine(models.Model):
 
             # Check the tax lock date.
             if line.parent_state == 'posted' and any(self.env['account.move']._field_will_change(line, vals, field_name) for field_name in protected_fields['tax']):
-                line._check_tax_lock_date()
+                tax_lock_check_ids.append(line.id)
 
             # Check the reconciliation.
             if any(self.env['account.move']._field_will_change(line, vals, field_name) for field_name in protected_fields['reconciliation']):
                 line._check_reconciliation()
+
+        self.browse(tax_lock_check_ids)._check_tax_lock_date()
 
         move_container = {'records': self.move_id}
         with self.move_id._check_balanced(move_container),\
@@ -1682,6 +1715,9 @@ class AccountMoveLine(models.Model):
             self.move_id._synchronize_business_models(['line_ids'])
             if any(field in vals for field in ['account_id', 'currency_id']):
                 self._check_constrains_account_id_journal_id()
+
+            # double check modified lines in case a tax field was changed on a line that didn't previously affect tax
+            self.browse(tax_lock_check_ids)._check_tax_lock_date()
 
             if not self.env.context.get('tracking_disable', False):
                 # Log changes to move lines on each move
@@ -1888,8 +1924,6 @@ class AccountMoveLine(models.Model):
             return currency._get_conversion_rate(aml.company_currency_id, currency, aml.company_id, exchange_rate_date)
 
         def get_accounting_rate(aml, currency):
-            if forced_rate := self._context.get('forced_rate_from_register_payment'):
-                return forced_rate
             balance = aml._get_reconciliation_aml_field_value('balance', shadowed_aml_values)
             amount_currency = aml._get_reconciliation_aml_field_value('amount_currency', shadowed_aml_values)
             if not aml.company_currency_id.is_zero(balance) and not currency.is_zero(amount_currency):
@@ -2033,6 +2067,20 @@ class AccountMoveLine(models.Model):
         debit_fully_matched = compare_amounts <= 0
         credit_fully_matched = compare_amounts >= 0
 
+        def get_amount_range_after_rate(currency_from, currency_to, amount, rate):
+            # Suppose balance=1000, rate=12.
+            # 1000.0 could be the result of a rounding of [999.995, 1000.0049999999999].
+            # Let's say the target currency could be [999.995 * 12, 1000.005 * 12] = [11999.94, 12000.06]
+            # instead of just 120000.
+            if not rate:
+                return 0.0, 0.0, 0.0
+            half_rounding = currency_from.rounding / 2
+            return (
+                currency_to.round((amount - half_rounding) * rate),
+                currency_to.round(amount * rate),
+                currency_to.round((amount + half_rounding) * rate),
+            )
+
         # ==== Computation of partial amounts ====
         if recon_currency == company_currency:
             if exchange_line_mode:
@@ -2067,17 +2115,56 @@ class AccountMoveLine(models.Model):
                 credit_rate = credit_recon_values['rate']
 
             # Compute the partial amount expressed in foreign currency.
-            if debit_rate:
-                partial_debit_amount = company_currency.round(min_recon_amount / debit_rate)
-                partial_debit_amount = min(partial_debit_amount, remaining_debit_amount)
-            else:
-                partial_debit_amount = 0.0
-            if credit_rate:
-                partial_credit_amount = company_currency.round(min_recon_amount / credit_rate)
-                partial_credit_amount = min(partial_credit_amount, -remaining_credit_amount)
-            else:
-                partial_credit_amount = 0.0
+            partial_debit_amount_range = get_amount_range_after_rate(
+                currency_from=debit_currency,
+                currency_to=company_currency,
+                amount=min_recon_amount,
+                rate=(1 / debit_rate) if debit_rate else 0.0,
+            )
+            partial_debit_amount = partial_debit_amount_range[1]
+            partial_debit_amount = min(partial_debit_amount, remaining_debit_amount)
+            partial_credit_amount_range = get_amount_range_after_rate(
+                currency_from=credit_currency,
+                currency_to=company_currency,
+                amount=min_recon_amount,
+                rate=(1 / credit_rate) if credit_rate else 0.0,
+            )
+            partial_credit_amount = partial_credit_amount_range[1]
+            partial_credit_amount = min(partial_credit_amount, -remaining_credit_amount)
             partial_amount = min(partial_debit_amount, partial_credit_amount)
+
+            # Prevent exchange differences if amounts are close enough to be a rounding issue
+            # after applying the exchange rate and then, rounding amounts to store them into
+            # the monetary fields.
+            # Suppose 2 lines:
+            # l1: balance=377554.0, amount_currency=20000.0
+            # l2: balance=-5314.62, amount_currency=-281.53
+            # ... computing min_recon_amount = min(20000.0, 281.53) = 281.53 in foreign currency to reconcile.
+            # The equivalent of 281.53 for l1 in company currency is 5314.64 that could be the result of rounding any value
+            # between [5314.54, 5314.7300000000005]
+            # ... considering the rate of 0.05297255491929631 and the rounding applied to reach this value.
+            # For l2, it will be 5314.62 in the range [5314.53, 5314.71].
+            #
+            # ---------
+            # | 5314.73         ---------       <- max amount
+            # |                 5314.71  |
+            # |                          |
+            # | 5314.64                  |
+            # |                 5314.62  |      Every number between the min and the max are considered as valid to be the partial amount.
+            # |                          |      Depending on the one we choose, we can avoid to create an exchange difference entry or
+            # |                          |      we could also prevent to let an unnecessary open residual amount.
+            # | 5314.54                  |
+            # ---------         5314.53  |      <- min amount
+            #                   ---------
+            if (
+                company_currency.compare_amounts(partial_debit_amount, partial_credit_amount_range[2]) <= 0
+                and company_currency.compare_amounts(partial_debit_amount, partial_credit_amount_range[0]) >= 0
+                and company_currency.compare_amounts(partial_credit_amount, partial_debit_amount_range[2]) <= 0
+                and company_currency.compare_amounts(partial_credit_amount, partial_debit_amount_range[0]) >= 0
+            ):
+                partial_amount = min(remaining_debit_amount, -remaining_credit_amount)
+                partial_debit_amount = partial_amount
+                partial_credit_amount = partial_amount
 
             # Compute the partial amount expressed in foreign currency.
             # Take care to handle the case when a line expressed in company currency is mimicking the foreign
@@ -2182,9 +2269,15 @@ class AccountMoveLine(models.Model):
         credit_values['amount_residual'] = remaining_credit_amount
         credit_values['amount_residual_currency'] = remaining_credit_amount_curr
 
-        if debit_fully_matched:
+        if (
+            debit_currency.is_zero(debit_values['amount_residual_currency'])
+            and company_currency.is_zero(debit_values['amount_residual'])
+        ):
             res['debit_values'] = None
-        if credit_fully_matched:
+        if (
+            credit_currency.is_zero(credit_values['amount_residual_currency'])
+            and company_currency.is_zero(credit_values['amount_residual'])
+        ):
             res['credit_values'] = None
         return res
 
@@ -2521,7 +2614,7 @@ class AccountMoveLine(models.Model):
 
         # ==== Create entries for cash basis taxes ====
         def is_cash_basis_needed(account):
-            return account.company_id.tax_exigibility \
+            return account.company_id.sudo().tax_exigibility \
                 and account.account_type in ('asset_receivable', 'liability_payable')
 
         if not self._context.get('move_reverse_cancel') and not self._context.get('no_cash_basis'):
@@ -2693,6 +2786,14 @@ class AccountMoveLine(models.Model):
 
         return partials
 
+    def _get_exchange_journal(self, company):
+        return company.currency_exchange_journal_id
+
+    def _get_exchange_account(self, company, amount):
+        if amount > 0.0:
+            return company.expense_currency_exchange_account_id
+        return company.income_currency_exchange_account_id
+
     def _prepare_exchange_difference_move_vals(self, amounts_list, company=None, exchange_date=None, **kwargs):
         """ Prepare values to create later the exchange difference journal entry.
         The exchange difference journal entry is there to fix the debit/credit of lines when the journal items are
@@ -2712,9 +2813,7 @@ class AccountMoveLine(models.Model):
         if not company:
             return
 
-        journal = company.currency_exchange_journal_id
-        expense_exchange_account = company.expense_currency_exchange_account_id
-        income_exchange_account = company.income_currency_exchange_account_id
+        journal = self._get_exchange_journal(company)
         accounting_exchange_date = journal.with_context(move_date=exchange_date).accounting_date if journal else date.min
 
         move_vals = {
@@ -2747,10 +2846,7 @@ class AccountMoveLine(models.Model):
             else:
                 continue
 
-            if amount_residual_to_fix > 0.0:
-                exchange_line_account = expense_exchange_account
-            else:
-                exchange_line_account = income_exchange_account
+            exchange_line_account = self._get_exchange_account(company, amount_residual_to_fix)
 
             sequence = len(move_vals['line_ids'])
             line_vals = [
@@ -2826,7 +2922,7 @@ class AccountMoveLine(models.Model):
 
         # ==== Create the move ====
         exchange_moves = self.env['account.move'].create(exchange_move_values_list)
-        exchange_moves._post(soft=False)
+        exchange_moves.with_context(validate_analytic=False)._post(soft=False)
 
         # ==== Reconcile ====
         reconciliation_plan = []
@@ -3135,8 +3231,10 @@ class AccountMoveLine(models.Model):
             distribution_on_each_plan = {}
             for account_ids, distribution in self.analytic_distribution.items():
                 line_values = self._prepare_analytic_distribution_line(float(distribution), account_ids, distribution_on_each_plan)
-                if not self.currency_id.is_zero(line_values.get('amount')):
+                if not self.company_currency_id.is_zero(line_values.get('amount')):
                     analytic_line_vals.append(line_values)
+
+            self._round_analytic_distribution_line(analytic_line_vals)
         return analytic_line_vals
 
     def _prepare_analytic_distribution_line(self, distribution, account_ids, distribution_on_each_plan):
@@ -3172,6 +3270,32 @@ class AccountMoveLine(models.Model):
             'company_id': self.company_id.id or self.env.company.id,
             'category': 'invoice' if self.move_id.is_sale_document() else 'vendor_bill' if self.move_id.is_purchase_document() else 'other',
         }
+
+    def _round_analytic_distribution_line(self, analytic_lines_vals):
+        """ Round the analytic lines amount, and cancel the rounding error. """
+        if not analytic_lines_vals:
+            return
+
+        rounding_error = 0
+        for line in analytic_lines_vals:
+            rounded_amount = self.company_currency_id.round(line['amount'])
+            rounding_error += rounded_amount - line['amount']
+            line['amount'] = rounded_amount
+
+        # distributing the rounding error
+        for line in analytic_lines_vals:
+            if self.company_currency_id.is_zero(rounding_error):
+                break
+            amt = max(
+                self.company_currency_id.rounding,
+                abs(self.company_currency_id.round(rounding_error / len(analytic_lines_vals)))
+            )
+            if rounding_error < 0.0:
+                line['amount'] += amt
+                rounding_error += amt
+            else:
+                line['amount'] -= amt
+                rounding_error -= amt
 
     # -------------------------------------------------------------------------
     # INSTALLMENTS
@@ -3239,17 +3363,24 @@ class AccountMoveLine(models.Model):
         return self._filter_reconciled_by_number(self._reconciled_by_number())
 
     def _get_attachment_domains(self):
-        self.ensure_one()
         domains = [[
             ('res_model', '=', 'account.move'),
-            ('res_id', '=', self.move_id.id),
+            ('res_id', 'in', self.move_id.ids),
             ('res_field', 'in', (False, 'invoice_pdf_report_file')),
         ]]
         if self.statement_id:
-            domains.append([('res_model', '=', 'account.bank.statement'), ('res_id', '=', self.statement_id.id)])
+            domains.append([('res_model', '=', 'account.bank.statement'), ('res_id', 'in', self.statement_id.ids)])
         if self.payment_id:
-            domains.append([('res_model', '=', 'account.payment'), ('res_id', '=', self.payment_id.id)])
+            domains.append([('res_model', '=', 'account.payment'), ('res_id', 'in', self.payment_id.ids)])
         return domains
+
+    @api.model
+    def _get_attachment_by_record(self, id_model2attachments, move_line):
+        return (
+            id_model2attachments.get(('account.move', move_line.move_id.id))
+            or id_model2attachments.get(('account.bank.statement', move_line.statement_id.id))
+            or id_model2attachments.get(('account.payment', move_line.payment_id.id))
+        )
 
     @api.model
     def _get_tax_exigible_domain(self):
@@ -3377,6 +3508,13 @@ class AccountMoveLine(models.Model):
 
     def _check_edi_line_tax_required(self):
         return True
+
+    def _filter_aml_lot_valuation(self):
+        """ Method used to filter the aml taken into account when computing the invoiced lot value in get_invoiced_lot_values
+        Intended to be overriden in localization.
+        """
+        self.ensure_one()
+        return self.move_id.state == 'posted'
 
     # -------------------------------------------------------------------------
     # PUBLIC ACTIONS

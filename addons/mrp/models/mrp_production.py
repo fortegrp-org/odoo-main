@@ -477,10 +477,16 @@ class MrpProduction(models.Model):
 
     @api.depends('procurement_group_id', 'procurement_group_id.stock_move_ids.group_id')
     def _compute_picking_ids(self):
+        grouped_stock_pickings = self.env['stock.picking']._read_group(
+            domain=[('group_id', 'in', self.procurement_group_id.ids), ('group_id', '!=', False)],
+            aggregates=['id:recordset'],
+            groupby=['group_id'],
+        )
+        pickings_per_procurement_group = {
+            group_id.id: picking_ids.sorted() for group_id, picking_ids in grouped_stock_pickings
+        }
         for order in self:
-            order.picking_ids = self.env['stock.picking'].search([
-                ('group_id', '=', order.procurement_group_id.id), ('group_id', '!=', False),
-            ])
+            order.picking_ids = pickings_per_procurement_group.get(order.procurement_group_id.id, [])
             order.delivery_count = len(order.picking_ids)
 
     @api.depends('product_uom_id', 'product_qty', 'product_id.uom_id')
@@ -581,7 +587,7 @@ class MrpProduction(models.Model):
                     if not (bom.operation_ids and (not bom_data['parent_line'] or bom_data['parent_line'].bom_id.operation_ids != bom.operation_ids)):
                         continue
                     for operation in bom.operation_ids:
-                        if operation._skip_operation_line(bom_data['product']):
+                        if operation._skip_operation_line(bom_data['product'] if not bom_data['parent_line'] else bom_data['parent_line']['product_id']):
                             continue
                         workorders_values += [{
                             'name': operation.name,
@@ -732,7 +738,7 @@ class MrpProduction(models.Model):
             days_delay = production.bom_id.produce_delay
             date_finished = production.date_start + relativedelta(days=days_delay)
             if production._should_postpone_date_finished(date_finished):
-                workorder_expected_duration = sum(self.workorder_ids.mapped('duration_expected'))
+                workorder_expected_duration = sum(production.workorder_ids.mapped('duration_expected'))
                 date_finished = date_finished + relativedelta(minutes=workorder_expected_duration or 60)
             production.date_finished = date_finished
 
@@ -1011,9 +1017,9 @@ class MrpProduction(models.Model):
             action['domain'] = [('id', 'in', self.picking_ids.ids)]
         elif self.picking_ids:
             action['res_id'] = self.picking_ids.id
-            action['views'] = [(self.env.ref('stock.view_picking_form').id, 'form')]
-            if 'views' in action:
-                action['views'] += [(state, view) for state, view in action['views'] if view != 'form']
+            picking_form = self.env.ref('stock.view_picking_form', False)
+            picking_form_view = [(picking_form and picking_form.id or False, 'form')]
+            action['views'] = picking_form_view + [(state, view) for state, view in action.get('views', []) if view != 'form']
         action['context'] = dict(self._context, default_origin=self.name)
         return action
 
@@ -1636,7 +1642,7 @@ class MrpProduction(models.Model):
         documents_by_production = {}
         for production in self:
             documents = defaultdict(list)
-            for move_raw_id in self.move_raw_ids.filtered(lambda m: m.state not in ('done', 'cancel')):
+            for move_raw_id in production.move_raw_ids.filtered(lambda m: m.state not in ('done', 'cancel')):
                 iterate_key = self._get_document_iterate_key(move_raw_id)
                 if iterate_key:
                     document = self.env['stock.picking']._log_activity_get_documents({move_raw_id: (move_raw_id.product_uom_qty, 0)}, iterate_key, 'UP')
@@ -1644,6 +1650,8 @@ class MrpProduction(models.Model):
                         documents[key] += [value]
             if documents:
                 documents_by_production[production] = documents
+            if self.env.context.get('skip_activity'):
+                continue
             # log an activity on Parent MO if child MO is cancelled.
             finish_moves = production.move_finished_ids.filtered(lambda x: x.state not in ('done', 'cancel'))
             if finish_moves:
@@ -1732,7 +1740,7 @@ class MrpProduction(models.Model):
             return name
         seq_back = "-" + "0" * (SIZE_BACK_ORDER_NUMERING - 1 - int(math.log10(sequence))) + str(sequence)
         regex = re.compile(r"-\d+$")
-        if regex.search(name) and sequence > 1:
+        if regex.search(name) and (max(self.procurement_group_id.mrp_production_ids.mapped("backorder_sequence")) > 1 or sequence > 1):
             return regex.sub(seq_back, name)
         return name + seq_back
 
@@ -2142,6 +2150,8 @@ class MrpProduction(models.Model):
             elif mo_ids_always:
                 # we have to pass all the MOs that the nevers/no issue MOs are also passed to be "mark done" without a backorder
                 res = self.with_context(skip_backorder=True, mo_ids_to_backorder=mo_ids_always).button_mark_done()
+                if res is not True:
+                    res['context'] = dict(res.get('context', {}), marked_as_done=all(mo.state == 'done' for mo in self))
                 return res if self._should_return_records() else True
         return True
 
@@ -2393,16 +2403,18 @@ class MrpProduction(models.Model):
         workorders_to_unlink = self.env['mrp.workorder']
         # For draft MO, all the work will be done by compute methods.
         # For cancelled and done MO, we don't want to do anything more than assinging the BoM.
-        if self.state == 'draft' and self.bom_id == bom:
-            # Empties `bom_id` field so when the BoM is reassigns to this field, depending computes
-            # will be triggered (doesn't happen if the field's value doesn't change).
-            self.bom_id = False
+        if self.state == 'draft':
+            # Don't straight up delete the moves/workorders but keep them for deletion after
+            # the BoM has been assigned (and thus after new moves/WO have been created).
+            moves_to_unlink = self.move_raw_ids
+            workorders_to_unlink = self.workorder_ids
+            if self.bom_id == bom:
+                # Only remove manual lines (not coming from BoM)
+                workorders_to_unlink = workorders_to_unlink.filtered(lambda w: not w.operation_id)
+                # Empty the `bom_id` field so that, when the BoM is reassigned to this field, depending
+                # computes are re-triggered (it doesn't happen if the value of the field doesn't change).
+                self.bom_id = False
         if self.state in ['cancel', 'done', 'draft']:
-            if self.state == 'draft':
-                # Don't straight delete the moves/workorders to avoid to cancel the MO, those will
-                # be deleted once the BoM is assigned (and thus after new moves/WO were created).
-                moves_to_unlink = self.move_raw_ids
-                workorders_to_unlink = self.workorder_ids
             self.bom_id = bom
             moves_to_unlink.unlink()
             workorders_to_unlink.unlink()
@@ -2536,6 +2548,8 @@ class MrpProduction(models.Model):
             byproduct_values.append(move_byproduct_vals)
         self.move_finished_ids += self.env['stock.move'].create(byproduct_values)
 
+        if self.warehouse_id.manufacture_steps in ('pbm', 'pbm_sam'):
+            moves_to_unlink.product_uom_qty = 0
         moves_to_unlink._action_cancel()
         moves_to_unlink.unlink()
         workorders_to_unlink.unlink()

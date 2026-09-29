@@ -26,6 +26,7 @@ export class PivotDataSource extends OdooViewsDataSource {
                     "pivot_row_groupby",
                     "pivot_column_groupby"
                 ),
+                comparison: undefined,
             },
         };
         super(services, filteredParams);
@@ -259,5 +260,17 @@ export class PivotDataSource extends OdooViewsDataSource {
     async prepareForTemplateGeneration() {
         this._assertDataIsLoaded();
         await this._model.prepareForTemplateGeneration();
+    }
+
+    get source() {
+        this._assertMetadataIsLoaded();
+        const data = this._metaData;
+        return {
+            resModel: data.resModel,
+            type: "pivot",
+            fields: data.activeMeasures,
+            groupby: [...data.colGroupBys, ...data.rowGroupBys],
+            domain: this.getComputedDomain()
+        };
     }
 }

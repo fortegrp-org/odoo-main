@@ -162,6 +162,31 @@ class TestLoyalty(TestSaleCouponCommon):
         order._action_cancel()
         self.assertFalse(order.coupon_point_ids)
 
+    def test_salesperson_can_cancel_order_with_coupons(self):
+        """Test that a salesperson can cancel an order with coupon points without access error."""
+        user_salesman = new_test_user(
+            self.env, login="user_salesman", groups="sales_team.group_sale_salesman"
+        )
+        self.env["loyalty.program"].create({
+            "name": "10% Discount",
+            "program_type": "coupons",
+            "trigger": "auto",
+            "reward_ids": [Command.create({"reward_type": "discount", "discount": 10})],
+        })
+        order = (
+            self
+            .env["sale.order"]
+            .with_user(user_salesman)
+            .create({
+                "partner_id": self.partner_a.id,
+                "order_line": [Command.create({"product_id": self.product_a.id})],
+            })
+        )
+        order.action_confirm()
+        self.assertTrue(order.coupon_point_ids)
+        order._action_cancel()
+        self.assertFalse(order.coupon_point_ids)
+
     def test_distribution_amount_payment_programs(self):
         """
         Check how the amount of a payment reward is distributed.
@@ -377,6 +402,57 @@ class TestLoyalty(TestSaleCouponCommon):
         self.assertEqual(order.amount_total, 90)
         order.action_confirm()
         self.assertEqual(loyalty_card.points, 90)
+
+    def test_multiple_rewards_after_confirm(self):
+        """
+        Check that multiple rewards from a loyalty promotion program are correctly applied to a SO
+        after its confirmation by asserting that:
+            - Both rewards are applied to the order lines.
+            - The total points cost matches the rule's requirement.
+            - The coupon's points are fully consumed after applying the rewards.
+        """
+        promo_program = self.immediate_promotion_program
+        promo_program.write({
+            'active': True,
+            'rule_ids': [
+                Command.clear(),
+                Command.create({
+                    'minimum_qty': 1,
+                    'minimum_amount': 0.00,
+                    'reward_point_amount': 2,
+                })
+            ],
+            'reward_ids': [
+                Command.clear(),
+                Command.create({
+                    'discount': 10,
+                    'discount_applicability': 'specific',
+                    'discount_product_ids': [self.product_A.id],
+                }),
+                Command.create({
+                    'discount': 15,
+                    'discount_applicability': 'specific',
+                    'discount_product_ids': [self.product_B.id],
+                })
+            ],
+        })
+
+        order = self.empty_order
+        order.order_line = [
+            Command.create({'product_id': self.product_A.id, 'product_uom_qty': 1}),
+            Command.create({'product_id': self.product_B.id, 'product_uom_qty': 1}),
+        ]
+        order.action_confirm()
+
+        order._update_programs_and_rewards()
+        coupon = order.coupon_point_ids.coupon_id
+        reward1, reward2 = rewards = promo_program.reward_ids
+        order._apply_program_reward(reward1, coupon)
+        order._apply_program_reward(reward2, coupon)
+
+        self.assertEqual(order.order_line.reward_id, rewards, "All rewards should be applied")
+        self.assertEqual(sum(order.order_line.mapped('points_cost')), 2)
+        self.assertEqual(coupon.points, 0)
 
     def test_points_awarded_discount_code_no_domain_program(self):
         """
@@ -1045,3 +1121,31 @@ class TestLoyalty(TestSaleCouponCommon):
         rewards = order._get_claimable_rewards()[coupon]
         msg = "Only the free product should be applicable, as the discount was already applied."
         self.assertEqual(rewards, product_reward, msg)
+
+    def test_sol_free_product_description_equals_reward_description(self):
+        """
+        Ensure that if a "Free Product" reward is added to a sale order,
+        its line description matches the reward description.
+        """
+        loyalty_program = self.env['loyalty.program'].create(
+            self.env['loyalty.program']._get_template_values()['buy_x_get_y']
+        )
+        reward = loyalty_program.reward_ids[0]
+        updated_description = f"{reward.description} Adding manual description"
+        reward.description = updated_description
+
+        order = self.empty_order
+        order.write({
+            'order_line': [
+                Command.create({
+                    'product_id': reward.reward_product_id.id,
+                    'name': '1 Product',
+                    'product_uom': self.uom_unit.id,
+                    'product_uom_qty': 4.0,
+                }),
+            ]
+        })
+        order.action_open_reward_wizard()
+
+        self.assertEqual(len(order.order_line.ids), 2)
+        self.assertEqual(order.order_line[1].name, updated_description)

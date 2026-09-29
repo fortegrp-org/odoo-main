@@ -30,7 +30,14 @@ class PurchaseOrderLine(models.Model):
         compute='_compute_price_unit_and_date_planned_and_name',
         digits='Discount',
         store=True, readonly=False)
-    taxes_id = fields.Many2many('account.tax', string='Taxes', context={'active_test': False})
+    taxes_id = fields.Many2many(
+        comodel_name='account.tax',
+        relation='account_tax_purchase_order_line_rel',
+        column1='purchase_order_line_id',
+        column2='account_tax_id',
+        string='Taxes',
+        context={'active_test': False},
+    )
     product_uom = fields.Many2one('uom.uom', string='Unit of Measure', domain="[('category_id', '=', product_uom_category_id)]")
     product_uom_category_id = fields.Many2one(related='product_id.uom_id.category_id')
     product_id = fields.Many2one('product.product', string='Product', domain=[('purchase_ok', '=', True)], change_default=True, index='btree_not_null')
@@ -465,9 +472,13 @@ class PurchaseOrderLine(models.Model):
         '''
         if not self.product_id:
             return
-        seller_min_qty = self.product_id.seller_ids\
-            .filtered(lambda r: r.partner_id == self.order_id.partner_id and (not r.product_id or r.product_id == self.product_id))\
-            .sorted(key=lambda r: r.min_qty)
+        seller_min_qty = self.product_id._select_seller(
+            partner_id=self.order_id.partner_id,
+            quantity=None,
+            date=self.order_id.date_order and self.order_id.date_order.date() or fields.Date.context_today(self),
+            ordered_by='min_qty',
+            params=self._get_select_sellers_params(),
+        )
         if seller_min_qty:
             self.product_qty = seller_min_qty[0].min_qty or 1.0
             self.product_uom = seller_min_qty[0].product_uom

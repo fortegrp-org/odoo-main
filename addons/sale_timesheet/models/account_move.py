@@ -87,6 +87,17 @@ class AccountMove(models.Model):
                 timesheets = self.env['account.analytic.line'].sudo().search(domain)
                 timesheets.write({'timesheet_invoice_id': line.move_id.id})
 
+    def action_post(self):
+        result = super().action_post()
+        credit_notes = self.filtered(lambda move: move.move_type == 'out_refund' and move.reversed_entry_id)
+        timesheets_sudo = self.env['account.analytic.line'].sudo().search([
+            ('timesheet_invoice_id', 'in', credit_notes.reversed_entry_id.ids),
+            ('so_line', 'in', credit_notes.invoice_line_ids.sale_line_ids.ids),
+            ('project_id', '!=', False),
+        ])
+        timesheets_sudo.write({'timesheet_invoice_id': False})
+        return result
+
 
 class AccountMoveLine(models.Model):
     _inherit = 'account.move.line'
@@ -133,5 +144,10 @@ class AccountMoveLine(models.Model):
             if so_line.id in sale_line_ids_per_move[timesheet_invoice.id].ids:
                 timesheet_ids += ids
 
-        self.sudo().env['account.analytic.line'].browse(timesheet_ids).write({'timesheet_invoice_id': False})
+        timesheets = self.sudo().env['account.analytic.line'].browse(timesheet_ids)
+        # Clearing the invoice link marks `so_line` to be recomputed, which can
+        # clear or reassign the allocation when the task/project sale order items
+        # no longer resolve. Deleting an invoice must not change what was delivered.
+        with self.env.protecting([timesheets._fields['so_line']], timesheets):
+            timesheets.write({'timesheet_invoice_id': False})
         return super().unlink()

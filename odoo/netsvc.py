@@ -3,6 +3,7 @@
 import contextlib
 import json
 import logging
+import logging.config
 import logging.handlers
 import os
 import platform
@@ -21,6 +22,10 @@ from . import tools
 from .modules import module
 
 _logger = logging.getLogger(__name__)
+
+
+real_time = time.time.__call__  # ensure we have a non patched time when using freezegun
+
 
 def log(logger, level, prefix, msg, depth=None):
     indent=''
@@ -45,18 +50,20 @@ class PostgreSQLHandler(logging.Handler):
     the current database, can be set using --log-db=DBNAME
     """
 
-    def __init__(self):
+    def __init__(self, log_db=None):
         super().__init__()
         self._support_metadata = False
-        if tools.config['log_db'] != '%d':
-            with contextlib.suppress(Exception), tools.mute_logger('odoo.sql_db'), sql_db.db_connect(tools.config['log_db'], allow_uri=True).cursor() as cr:
+        self._log_db = log_db or tools.config['log_db']
+
+        if self._log_db != '%d':
+            with contextlib.suppress(Exception), tools.mute_logger('odoo.sql_db'), sql_db.db_connect(self._log_db, allow_uri=True).cursor() as cr:
                 cr.execute("""SELECT 1 FROM information_schema.columns WHERE table_name='ir_logging' and column_name='metadata'""")
                 self._support_metadata = bool(cr.fetchone())
 
     def emit(self, record):
         ct = threading.current_thread()
         ct_db = getattr(ct, 'dbname', None)
-        dbname = tools.config['log_db'] if tools.config['log_db'] and tools.config['log_db'] != '%d' else ct_db
+        dbname = self._log_db if self._log_db and self._log_db != '%d' else ct_db
         if not dbname:
             return
         with contextlib.suppress(Exception), tools.mute_logger('odoo.sql_db'), sql_db.db_connect(dbname, allow_uri=True).cursor() as cr:
@@ -145,6 +152,16 @@ class DBFormatter(logging.Formatter):
         record.dbname = getattr(threading.current_thread(), 'dbname', '?')
         return logging.Formatter.format(self, record)
 
+    def formatMessage(self, record):
+        if record.munge_traceback:
+            return super().formatMessage(record).replace(
+                'Traceback (most recent call last):',
+                '_Traceback_ (most recent call last):',
+            )
+        else:
+            return super().formatMessage(record)
+
+
 class ColoredFormatter(DBFormatter):
     def format(self, record):
         fg_color, bg_color = LEVEL_COLOR_MAPPING.get(record.levelno, (GREEN, DEFAULT))
@@ -162,6 +179,10 @@ def init_logger():
     def record_factory(*args, **kwargs):
         record = old_factory(*args, **kwargs)
         record.perf_info = ""
+        record.munge_traceback = False
+        if time.time.__call__ != real_time:
+            record.faked_created = record.created
+            record.created = real_time()
         return record
     logging.setLogRecordFactory(record_factory)
 
@@ -203,8 +224,36 @@ def init_logger():
     # need to be adapted later but too muchwork for this pr.
     warnings.filterwarnings('ignore', r'^datetime.datetime.utcnow\(\) is deprecated and scheduled for removal in a future version.*', category=DeprecationWarning)
 
+    # This warning is triggered library only during the python precompilation which does not occur on readonly filesystem
+    warnings.filterwarnings("ignore", r'invalid escape sequence', category=DeprecationWarning, module=".*vobject")
+    warnings.filterwarnings("ignore", r'invalid escape sequence', category=SyntaxWarning, module=".*vobject")
+
+    # jammy's pdfminer has a broken version (the distribution returns
+    # `-VERSION-`, the code has a version of `__VERSION__`), which triggers
+    # these warnings when trying to check the version of something else (ldap):
+    #
+    # - the first signals a fallback after failing to parse the above as a `Version`
+    # - the second signals the use of the `LegacyVersion`... as fallback
+    try:
+        from pkg_resources import PkgResourcesDeprecationWarning  # noqa: PLC0415
+        warnings.filterwarnings("ignore", r'.*-VERSION-', category=PkgResourcesDeprecationWarning, module="pkg_resources")
+        warnings.filterwarnings("ignore", r'.*\bLegacyVersion\b', category=DeprecationWarning, module="pkg_resources")
+    except ImportError:
+        pass
     from .tools.translate import resetlocale
     resetlocale()
+
+    conf = tools.config['log_config']
+    if conf:
+        with open(conf, 'rb') as fobj:
+            conf = json.load(fobj)
+            # since we create a bunch of loggers at import, if this is enabled
+            # (default) none of the loggers created before loading the config
+            # will fire unless they're forcefully enabled in the config file
+            conf['disable_existing_loggers'] = False
+        logging.config.dictConfig(conf)
+        if not conf.get('keep_odoo_default', False):
+            return
 
     # create a format for log messages and dates
     format = '%(asctime)s %(pid)s %(levelname)s %(dbname)s %(name)s: %(message)s %(perf_info)s'
@@ -301,7 +350,8 @@ PSEUDOCONFIG_MAPPER = {
 }
 
 logging.RUNBOT = 25
-logging.addLevelName(logging.RUNBOT, "INFO") # displayed as info in log
+logging.addLevelName(logging.RUNBOT, "RUNBOT")
+logging._levelToName[logging.RUNBOT] = "INFO"  # displayed as info in log
 logging.captureWarnings(True)
 # must be after `loggin.captureWarnings` so we override *that* instead of the
 # other way around

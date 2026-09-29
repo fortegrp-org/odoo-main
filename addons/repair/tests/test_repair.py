@@ -2,7 +2,7 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
 from odoo import Command
-from odoo.exceptions import UserError
+from odoo.exceptions import AccessError, UserError
 from odoo.tests import tagged, common, Form
 from odoo.tools import float_compare, float_is_zero
 
@@ -826,3 +826,84 @@ class TestRepair(common.TransactionCase):
             'quantity': 1.0,
         })]
         self.assertEqual(repair_order.lot_id, sn_1)
+
+    def test_copy_repair_product_with_different_groups(self):
+        """
+            This test checks if the product can be copied with users that don't have access on the Inventory app
+        """
+        product_templ = self.env['product.template'].create({
+            'name': "Repair Consumable",
+            'type': 'consu',
+            'create_repair': True,
+        })
+        mitchell_user = self.env['res.users'].create({
+            'name': "Mitchell not Admin",
+            'login': "m_user",
+            'email': "m@user.com",
+            'groups_id': [Command.set(self.env.ref('sales_team.group_sale_manager').ids)],
+        })
+        product_templ.invalidate_recordset(['create_repair'])
+        with self.assertRaises(AccessError):
+            product_templ.with_user(mitchell_user).create_repair
+        copied_without_access = product_templ.with_user(mitchell_user).copy()
+        mitchell_user.write({
+            'groups_id': [Command.link(self.env.ref('stock.group_stock_user').id)]
+        })
+        self.assertFalse(copied_without_access.create_repair)
+        copied_with_access = product_templ.copy().with_user(mitchell_user)
+        self.assertTrue(copied_with_access.create_repair)
+
+    def test_delivered_qty_of_generated_so(self):
+        """
+        Test that checks that `qty_delivered` of the generated SOL is correctly set when the repair is done.
+        """
+        repair_order = self.env['repair.order'].create({
+            'product_id': self.product_storable_order_repair.id,
+            'product_uom': self.product_storable_order_repair.uom_id.id,
+            'partner_id': self.res_partner_1.id,
+            'move_ids': [
+                Command.create({
+                    'product_id': self.product_consu_order_repair.id,
+                    'product_uom_qty': 1.0,
+                    'state': 'draft',
+                    'repair_line_type': 'add',
+                })
+            ],
+        })
+        repair_order.action_validate()
+        repair_order.action_repair_start()
+        repair_order.action_repair_end()
+        self.assertEqual(repair_order.state, 'done')
+        self.assertEqual(repair_order.move_ids.quantity, 1.0)
+        repair_order.action_create_sale_order()
+        sale_order = repair_order.sale_order_id
+        sale_order.action_confirm()
+        self.assertEqual(sale_order.order_line.qty_delivered, 1.0)
+
+    def test_sale_order_line_discount_on_repair_order(self):
+        """
+        Test that the discount on the sale order line created from a repair order is correctly set.
+        """
+        repair_order = self.repair0
+        repair_order.action_create_sale_order()
+        sale_line = repair_order.move_ids.sale_line_id
+        sale_line.order_id.pricelist_id.discount_policy = 'without_discount'
+        sale_line.discount = 15
+        repair_order.action_validate()
+        repair_order.action_repair_start()
+        repair_order.action_repair_end()
+        self.assertEqual(sale_line.discount, 15)
+
+    def test_delete_repair_resets_outgoing_stock_moves(self):
+        """
+        Test that deleting draft repair order clears its outgoing stock quantities and
+        related moves are unlinked
+        """
+        repair = self._create_simple_repair_order()
+        self._create_simple_part_move(repair.id, 1.0)
+        moves = repair.move_ids
+        self.assertEqual(repair.state, 'draft')
+        self.assertEqual(moves.state, 'draft')
+        repair.unlink()
+        self.assertFalse(repair.exists())
+        self.assertFalse(moves.exists())

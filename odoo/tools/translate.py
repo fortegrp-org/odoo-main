@@ -34,6 +34,7 @@ import odoo
 from odoo.exceptions import UserError
 from . import config, pycompat
 from .misc import file_open, file_path, get_iso_codes, SKIPPED_ELEMENT_TYPES
+from .sql import SQL
 
 _logger = logging.getLogger(__name__)
 
@@ -157,10 +158,11 @@ TRANSLATED_ELEMENTS = {
 
 # Which attributes must be translated. This is a dict, where the value indicates
 # a condition for a node to have the attribute translatable.
+# ⚠ Note that it implicitly includes their t-attf-* equivalent.
 TRANSLATED_ATTRS = dict.fromkeys({
     'string', 'add-label', 'help', 'sum', 'avg', 'confirm', 'placeholder', 'alt', 'title', 'aria-label',
     'aria-keyshortcuts', 'aria-placeholder', 'aria-roledescription', 'aria-valuetext',
-    'value_label', 'data-tooltip', 'data-editor-message', 'label',
+    'value_label', 'data-tooltip', 'data-editor-message', 'label', 'cancel-label', 'confirm-label', 'confirm-title',
 }, lambda e: True)
 
 def translate_attrib_value(node):
@@ -179,6 +181,19 @@ TRANSLATED_ATTRS.update(
     **{f't-attf-{attr}': cond for attr, cond in TRANSLATED_ATTRS.items()},
 )
 
+# This should match the list provided to OWL (see translatableAttributes).
+OWL_TRANSLATED_ATTRS = {
+    "alt",
+    "aria-label",
+    "aria-placeholder",
+    "aria-roledescription",
+    "aria-valuetext",
+    "data-tooltip",
+    "label",
+    "placeholder",
+    "title",
+}
+
 avoid_pattern = re.compile(r"\s*<!DOCTYPE", re.IGNORECASE | re.MULTILINE | re.UNICODE)
 space_pattern = re.compile(r"[\s\uFEFF]*")  # web_editor uses \uFEFF as ZWNBSP
 
@@ -196,40 +211,50 @@ def translate_xml_node(node, callback, parse, serialize):
         """ Return whether ``text`` is a string with non-space characters. """
         return bool(text) and not space_pattern.fullmatch(text)
 
-    def translatable(node):
+    def is_force_inline(node):
+        """ Return whether ``node`` is marked as it should be translated as
+            one term.
+        """
+        return "o_translate_inline" in node.attrib.get("class", "").split()
+
+    def translatable(node, force_inline=False):
         """ Return whether the given node can be translated as a whole. """
+        # Some specific nodes (e.g., text highlights) have an auto-updated DOM
+        # structure that makes them impossible to translate.
+        # The introduction of a translation `<span>` in the middle of their
+        # hierarchy breaks their functionalities. We need to force them to be
+        # translated as a whole using the `o_translate_inline` class.
+        force_inline = force_inline or is_force_inline(node)
         return (
-            # Some specific nodes (e.g., text highlights) have an auto-updated
-            # DOM structure that makes them impossible to translate.
-            # The introduction of a translation `<span>` in the middle of their
-            # hierarchy breaks their functionalities. We need to force them to
-            # be translated as a whole using the `o_translate_inline` class.
-            "o_translate_inline" in node.attrib.get("class", "").split()
-            or node.tag in TRANSLATED_ELEMENTS
-            and not any(key.startswith("t-") for key in node.attrib)
-            and all(translatable(child) for child in node)
+            (force_inline or node.tag in TRANSLATED_ELEMENTS)
+            # Nodes with directives are not translatable. Directives usually
+            # start with `t-`, but this prefix is optional for `groups` (see
+            # `_compile_directive_groups` which reads `t-groups` and `groups`)
+            and not any(key.startswith("t-") or key == 'groups' for key in node.attrib)
+            and all(translatable(child, force_inline) for child in node)
         )
 
-    def hastext(node, pos=0):
+    def hastext(node, pos=0, force_inline=False):
         """ Return whether the given node contains some text to translate at the
             given child node position.  The text may be before the child node,
             inside it, or after it.
         """
+        force_inline = force_inline or is_force_inline(node)
         return (
             # there is some text before node[pos]
             nonspace(node[pos-1].tail if pos else node.text)
             or (
                 pos < len(node)
-                and translatable(node[pos])
+                and translatable(node[pos], force_inline)
                 and (
                     any(  # attribute to translate
                         val and key in TRANSLATED_ATTRS and TRANSLATED_ATTRS[key](node[pos])
                         for key, val in node[pos].attrib.items()
                     )
                     # node[pos] contains some text to translate
-                    or hastext(node[pos])
+                    or hastext(node[pos], 0, force_inline)
                     # node[pos] has no text, but there is some text after it
-                    or hastext(node, pos + 1)
+                    or hastext(node, pos + 1, force_inline)
                 )
             )
         )
@@ -253,7 +278,7 @@ def translate_xml_node(node, callback, parse, serialize):
                 # into a <div> element
                 div = etree.Element('div')
                 div.text = (node[pos-1].tail if pos else node.text) or ''
-                while pos < len(node) and translatable(node[pos]):
+                while pos < len(node) and translatable(node[pos], is_force_inline(node)):
                     div.append(node[pos])
 
                 # translate the content of the <div> element as a whole
@@ -418,7 +443,10 @@ def get_text_content(term):
 
 def is_text(term):
     """ Return whether the term has only text. """
-    return len(html.fromstring(f"<_>{term}</_>")) == 0
+    it = html.fromstring(f"<root>{term}</root>").iter()
+    next(it)  # consume <root>
+    return next(it, None) is None
+
 
 xml_translate.get_text_content = get_text_content
 html_translate.get_text_content = get_text_content
@@ -919,8 +947,9 @@ def trans_export_records(lang, model_name, ids, buffer, format, cr):
 def _push(callback, term, source_line):
     """ Sanity check before pushing translation terms """
     term = (term or "").strip()
-    # Avoid non-char tokens like ':' '...' '.00' etc.
-    if len(term) > 8 or any(x.isalpha() for x in term):
+    # We only want to export strings that are likely to be translated.
+    # We avoid exporting strings that contain no letters, like `:`, `...`, `.00`, etc.
+    if any(x.isalpha() for x in term):
         callback(term, source_line)
 
 def _extract_translatable_qweb_terms(element, callback):
@@ -947,7 +976,7 @@ def _extract_translatable_qweb_terms(element, callback):
             # component nodes
             is_component = el.tag[0].isupper() or "t-component" in el.attrib or "t-set-slot" in el.attrib
             for attr in el.attrib:
-                if (not is_component and attr in TRANSLATED_ATTRS) or (is_component and attr.endswith(".translate")):
+                if (not is_component and attr in OWL_TRANSLATED_ATTRS) or (is_component and attr.endswith(".translate")):
                     _push(callback, el.attrib[attr], el.sourceline)
             _extract_translatable_qweb_terms(el, callback)
         _push(callback, el.tail, el.sourceline)
@@ -1055,14 +1084,11 @@ class TranslationReader:
         msgid "<source>"
         record_id is the database id of the record being translated
         """
-        # empty and one-letter terms are ignored, they probably are not meant to be
-        # translated, and would be very hard to translate anyway.
         sanitized_term = (source or '').strip()
-        # remove non-alphanumeric chars
-        sanitized_term = re.sub(r'\W+', '', sanitized_term)
-        if not sanitized_term or len(sanitized_term) <= 1:
-            return
-        self._to_translate.append((module, source, name, res_id, ttype, tuple(comments or ()), record_id, value))
+        # We only want to export strings that are likely to be translated.
+        # We avoid exporting strings that contain no letters, like `:`, `...`, `.00`, etc.
+        if any(x.isalpha() for x in sanitized_term):
+            self._to_translate.append((module, source, name, res_id, ttype, tuple(comments or ()), record_id, value))
 
     def _export_imdinfo(self, model: str, imd_per_id: dict[int, ImdInfo]):
         records = self._get_translatable_records(imd_per_id.values())
@@ -1495,15 +1521,20 @@ class TranslationImporter:
                                 translations.update({k: v for k, v in translation_dictionary[term_en].items() if v != term_en})
                                 translation_dictionary[term_en] = translations
 
+                        changed_values = {}
                         for lang in langs:
                             # translate and confirm model_terms translations
-                            values[lang] = field.translate(lambda term: translation_dictionary.get(term, {}).get(lang), _value_en)
-                            values.pop(f'_{lang}', None)
-                        params.extend((id_, Json(values)))
+                            new_val = field.translate(lambda term: translation_dictionary.get(term, {}).get(lang), _value_en)
+                            if values.get(lang, None) != new_val:
+                                changed_values[lang] = new_val
+                            if f'_{lang}' in values:
+                                changed_values[f'_{lang}'] = None
+                        if changed_values:
+                            params.extend((id_, Json(changed_values)))
                     if params:
                         env.cr.execute(f"""
                             UPDATE "{model_table}" AS m
-                            SET "{field_name}" =  t.value
+                            SET "{field_name}" = jsonb_strip_nulls("{field_name}" || t.value)
                             FROM (
                                 VALUES {', '.join(['(%s, %s::jsonb)'] * (len(params) // 2))}
                             ) AS t(id, value)
@@ -1517,26 +1548,67 @@ class TranslationImporter:
             model_table = Model._table
             for field_name, field_dictionary in model_dictionary.items():
                 for sub_field_dictionary in cr.split_for_in_conditions(field_dictionary.items()):
-                    # [xmlid, translations, xmlid, translations, ...]
-                    params = []
+                    # Parallel arrays + ORDINALITY preserve sub_field_dictionary order
+                    # so colliding xmlids merge deterministically in SQL.
+                    imd_modules, imd_names, values = [], [], []
                     for xmlid, translations in sub_field_dictionary:
-                        params.extend([*xmlid.split('.', maxsplit=1), Json(translations)])
-                    if not force_overwrite:
-                        value_query = f"""CASE WHEN {overwrite} IS TRUE AND imd.noupdate IS FALSE
-                        THEN m."{field_name}" || t.value
-                        ELSE t.value || m."{field_name}"END"""
+                        module, name = xmlid.split('.', maxsplit=1)
+                        imd_modules.append(module)
+                        imd_names.append(name)
+                        values.append(Json(translations))
+
+                    field = SQL.identifier(field_name)
+                    if force_overwrite:
+                        value_query = SQL("m.%(field)s || merged.noupdate_value || merged.update_value", field=field)
+                    elif overwrite:
+                        value_query = SQL("merged.noupdate_value || m.%(field)s || merged.update_value", field=field)
                     else:
-                        value_query = f'm."{field_name}" || t.value'
-                    env.cr.execute(f"""
-                        UPDATE "{model_table}" AS m
-                        SET "{field_name}" = {value_query}
-                        FROM (
-                            VALUES {', '.join(['(%s, %s, %s::jsonb)'] * (len(params) // 3))}
-                        ) AS t(imd_module, imd_name, value)
-                        JOIN "ir_model_data" AS imd
-                        ON imd."model" = '{model_name}' AND imd.name = t.imd_name AND imd.module = t.imd_module
-                        WHERE imd."res_id" = m."id"
-                    """, params)
+                        value_query = SQL("merged.noupdate_value || merged.update_value || m.%(field)s", field=field)
+
+                    # Single UPDATE via CTEs:
+                    # 1. input: unnest imported (module, name, translations) with ordinality
+                    # 2. entries: resolve xmlid → res_id and expand jsonb keys
+                    # 3. merged: aggregate per res_id
+                    env.cr.execute(SQL("""
+                        WITH input(imd_module, imd_name, value, id) AS (
+                            SELECT * FROM unnest(%(imd_modules)s::text[], %(imd_names)s::text[], %(values)s::jsonb[]) WITH ORDINALITY
+                        ),
+                        entries AS (
+                            SELECT imd.res_id, imd.noupdate, input.id, translation.key, translation.value
+                            FROM input
+                            JOIN "ir_model_data" AS imd
+                            ON imd.model = %(model_name)s
+                            AND imd.module = input.imd_module
+                            AND imd.name = input.imd_name
+                            CROSS JOIN LATERAL jsonb_each(input.value) AS translation(key, value)
+                        ),
+                        merged AS (
+                            SELECT
+                                res_id,
+                                COALESCE(
+                                    jsonb_object_agg(key, value ORDER BY id ASC) FILTER (WHERE noupdate),
+                                    '{}'::jsonb
+                                ) AS noupdate_value,
+                                COALESCE(
+                                    jsonb_object_agg(key, value ORDER BY id ASC) FILTER (WHERE NOT noupdate),
+                                    '{}'::jsonb
+                                ) AS update_value
+                            FROM entries
+                            GROUP BY res_id
+                        )
+                        UPDATE %(table)s AS m
+                        SET %(field)s = %(value_query)s
+                        FROM merged
+                        WHERE m.id = merged.res_id
+                    """,
+                        imd_modules=imd_modules,
+                        imd_names=imd_names,
+                        values=values,
+                        model_name=model_name,
+                        table=SQL.identifier(model_table),
+                        field=field,
+                        value_query=value_query,
+                    ))
 
         self.model_translations.clear()
 
@@ -1620,17 +1692,17 @@ def get_po_paths(module_name: str, lang: str):
 
 
 def get_po_paths_env(module_name: str, lang: str, env: odoo.api.Environment | None = None):
-    lang_base = lang.split('_')[0]
+    lang_base = lang.split('_', 1)[0]
     # Load the base as a fallback in case a translation is missing:
     po_names = [lang_base, lang]
     # Exception for Spanish locales: they have two bases, es and es_419:
     if lang_base == 'es' and lang not in ('es_ES', 'es_419'):
         po_names.insert(1, 'es_419')
-    po_paths = [
+    po_paths = (
         join(module_name, dir_, filename + '.po')
         for filename in po_names
         for dir_ in ('i18n', 'i18n_extra')
-    ]
+    )
     for path in po_paths:
         with suppress(FileNotFoundError):
             yield file_path(path, env=env)
@@ -1742,7 +1814,7 @@ def _get_translation_upgrade_queries(cr, field):
         """
         migrate_queries.append(cr.mogrify(query, [Model._name, translation_name]).decode())
 
-        query = "DELETE FROM _ir_translation WHERE type = 'model' AND name = %s"
+        query = "DELETE FROM _ir_translation WHERE type = 'model' AND state = 'translated' AND name = %s"
         cleanup_queries.append(cr.mogrify(query, [translation_name]).decode())
 
     # upgrade model_terms translation: one update per field per record
@@ -1816,7 +1888,7 @@ def _get_translation_upgrade_queries(cr, field):
             query = f'UPDATE "{Model._table}" SET "{field.name}" = %s WHERE id = %s'
             migrate_queries.append(cr.mogrify(query, [Json(new_values), id_]).decode())
 
-        query = "DELETE FROM _ir_translation WHERE type = 'model_terms' AND name = %s"
+        query = "DELETE FROM _ir_translation WHERE type = 'model_terms' AND state = 'translated' AND name = %s"
         cleanup_queries.append(cr.mogrify(query, [translation_name]).decode())
 
     return migrate_queries, cleanup_queries

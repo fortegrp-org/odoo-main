@@ -85,13 +85,16 @@ const FormEditor = options.Class.extend({
      *
      * @private
      * @param {string} type the type of the field
-     * @param {string} name The name of the field used also as label
+     * @param {string} label The label of the field. Also used as the field's
+     *                       name if no `name` is provided.
+     * @param {string} [name] The name of the field. Falls back to `label` if
+     *                        not specified
      * @returns {Object}
      */
-    _getCustomField: function (type, name) {
+    _getCustomField: function (type, label, name = "") {
         return {
-            name: name,
-            string: name,
+            name: name || label,
+            string: label,
             custom: true,
             type: type,
             // Default values for x2many fields and selection
@@ -182,7 +185,7 @@ const FormEditor = options.Class.extend({
         if (!field.id) {
             field.id = weUtils.generateHTMLId();
         }
-        const params = { field: { ...field }, defaultName: escape(_t("Field")) };
+        const params = { field: { ...field }, defaultName: escape(field.string || _t("Field")) };
         if (["url", "email", "tel"].includes(field.type)) {
             params.field.inputType = field.type;
         }
@@ -211,6 +214,12 @@ const FormEditor = options.Class.extend({
         });
         template.content.querySelectorAll("[data-name]").forEach(el => {
             el.dataset.name = this._getQuotesEncodedName(el.dataset.name);
+        });
+        // TODO remove this part in master and add offset classes in xml
+        template.content.querySelectorAll('.s_website_form_field').forEach(el => {
+            if (field.formatInfo.offset) {
+                el.classList.add(field.formatInfo.offset);
+            };
         });
         return template.content.firstElementChild;
     },
@@ -242,7 +251,8 @@ const FieldEditor = FormEditor.extend({
         let field;
         const labelText = this.$target.find('.s_website_form_label_content').text();
         if (this._isFieldCustom()) {
-            field = this._getCustomField(this.$target[0].dataset.type, labelText);
+            const inputName = this.$target[0].querySelector(".s_website_form_input").getAttribute("name");
+            field = this._getCustomField(this.$target[0].dataset.type, labelText, inputName);
         } else {
             field = Object.assign({}, this.fields[this._getFieldName()]);
             field.string = labelText;
@@ -274,6 +284,7 @@ const FieldEditor = FormEditor.extend({
             labelWidth: this.$target[0].querySelector('.s_website_form_label').style.width,
             multiPosition: multipleInput && multipleInput.dataset.display || 'horizontal',
             col: [...this.$target[0].classList].filter(el => el.match(/^col-/g)).join(' '),
+            offset: [...this.$target[0].classList].filter(el => el.match(/^offset-/g)).join(' '),
             requiredMark: requiredMark,
             optionalMark: optionalMark,
             mark: mark && mark.textContent,
@@ -839,11 +850,17 @@ options.registry.WebsiteFormEditor = FormEditor.extend({
         // Load template
         if (formInfo) {
             const formatInfo = this._getDefaultFormat();
-            await formInfo.formFields.forEach(async field => {
-                field.formatInfo = formatInfo;
-                await this._fetchFieldRecords(field);
-                this.$target.find('.s_website_form_submit, .s_website_form_recaptcha').first().before(this._renderField(field));
-            });
+            for (const field of formInfo.formFields) {
+                // Create a shallow copy of field to prevent unintended
+                // mutations to the original field stored in FormEditorRegistry
+                const _field = { ...field };
+                _field.formatInfo = formatInfo;
+                await this._fetchFieldRecords(_field);
+                const targetEl = this.$target[0].querySelector(".s_website_form_submit, .s_website_form_recaptcha");
+                if (targetEl) {
+                    targetEl.parentNode.insertBefore(this._renderField(_field), targetEl);
+                }
+            }
         }
     },
     /**
@@ -958,6 +975,15 @@ options.registry.WebsiteFieldEditor = FieldEditor.extend({
     /**
      * @override
      */
+    onBuilt: async function () {
+        await this._super(...arguments);
+        // Re-render the field to ensure unique field IDs across multiple form
+        // snippets
+        this._rerenderField();
+    },
+    /**
+     * @override
+     */
     cleanForSave: function () {
         this.$target[0].querySelectorAll('#editable_select').forEach(el => el.remove());
         const select = this._getSelect();
@@ -991,10 +1017,7 @@ options.registry.WebsiteFieldEditor = FieldEditor.extend({
      * @override
      */
     onClone() {
-        const field = this._getActiveField();
-        delete field.id;
-        const fieldEl = this._renderField(field);
-        this._replaceFieldElement(fieldEl);
+        this._rerenderField();
     },
     /**
      * Removes the visibility conditions concerned by the deleted field
@@ -1057,6 +1080,10 @@ options.registry.WebsiteFieldEditor = FieldEditor.extend({
      * Set the name of the field on the label
      */
     setLabelText: function (previewMode, value, params) {
+        // If value is empty, use the original field label
+        if (!value.trim() && this.$target[0].dataset.translatedName) {
+            value = this.$target[0].dataset.translatedName;
+        }
         this.$target.find('.s_website_form_label_content').text(value);
         if (this._isFieldCustom()) {
             value = this._getQuotesEncodedName(value);
@@ -1565,7 +1592,8 @@ options.registry.WebsiteFieldEditor = FieldEditor.extend({
             }
         }
         const newInputEl = this.$target[0].querySelector('input');
-        if (newInputEl) {
+        // Keep prefill only when rerendering the same field.
+        if (newInputEl && dataFillWith && previousName === newName && previousType === newType) {
             newInputEl.dataset.fillWith = dataFillWith;
         }
     },
@@ -1618,6 +1646,17 @@ options.registry.WebsiteFieldEditor = FieldEditor.extend({
      */
     _getSelect: function () {
         return this.$target[0].querySelector('select');
+    },
+    /**
+     * Re-renders the currently active form field in the DOM.
+     *
+     * @private
+     */
+    _rerenderField() {
+        const field = this._getActiveField();
+        delete field.id;
+        const fieldEl = this._renderField(field);
+        this._replaceFieldElement(fieldEl);
     },
 });
 

@@ -50,7 +50,7 @@ re_into = re.compile(r'\binto\s+"?([a-zA-Z_0-9]+)\b', re.IGNORECASE)
 
 sql_counter = 0
 
-MAX_IDLE_TIMEOUT = 60 * 10
+MAX_IDLE_TIMEOUT = int(os.getenv("ODOO_DB_MAX_IDLE_TIMEOUT", "600"))
 
 
 class Savepoint:
@@ -276,6 +276,9 @@ class Cursor(BaseCursor):
 
         self.cache = {}
         self._now = None
+        if os.getenv('ODOO_FAKETIME_TEST_MODE') and self.dbname in tools.config['db_name'].split(','):
+            self.execute("SET search_path = public, pg_catalog;")
+            self.commit()  # ensure that the search_path remains after a rollback
 
     def __build_dict(self, row):
         return {d.name: row[i] for i, d in enumerate(self._obj.description)}
@@ -327,6 +330,13 @@ class Cursor(BaseCursor):
             raise ValueError("SQL query parameters should be a tuple, list or dict; got %r" % (params,))
 
         start = real_time()
+        update_query_endtime_functions = []
+        current_thread = threading.current_thread()
+        for hook in getattr(current_thread, 'query_hooks', ()):
+            func = hook(self, query, params, start, 10)
+            if func and callable(func):
+                update_query_endtime_functions.append(func)
+
         try:
             params = params or None
             res = self._obj.execute(query, params)
@@ -343,14 +353,13 @@ class Cursor(BaseCursor):
         self.sql_log_count += 1
         sql_counter += 1
 
-        current_thread = threading.current_thread()
         if hasattr(current_thread, 'query_count'):
             current_thread.query_count += 1
             current_thread.query_time += delay
 
         # optional hooks for performance and tracing analysis
-        for hook in getattr(current_thread, 'query_hooks', ()):
-            hook(self, query, params, start, delay)
+        for update_query_endtime_function in update_query_endtime_functions:
+            update_query_endtime_function(delay)
 
         # advanced stats
         if _logger.isEnabledFor(logging.DEBUG) or self._sql_table_tracking:
@@ -556,16 +565,16 @@ class TestCursor(BaseCursor):
 
     def close(self):
         if not self._closed:
-            self.rollback()
-            self._closed = True
-            if self._savepoint:
-                self._savepoint.close(rollback=False)
-
-            tos = self._cursors_stack.pop()
-            if tos is not self:
-                _logger.warning("Found different un-closed cursor when trying to close %s: %s", self, tos)
-
-            self._lock.release()
+            try:
+                self.rollback()
+                if self._savepoint:
+                    self._savepoint.close(rollback=False)
+            finally:
+                self._closed = True
+                tos = self._cursors_stack.pop()
+                if tos is not self:
+                    _logger.warning("Found different un-closed cursor when trying to close %s: %s", self, tos)
+                self._lock.release()
 
     def commit(self):
         """ Perform an SQL `COMMIT` """

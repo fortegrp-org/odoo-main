@@ -3,7 +3,9 @@
 
 import time
 
+from odoo.tests import Form
 from odoo.tests.common import TransactionCase
+from odoo import fields
 
 class TestEquipment(TransactionCase):
     """ Test used to check that when doing equipment/maintenance_request/equipment_category creation."""
@@ -119,3 +121,65 @@ class TestEquipment(TransactionCase):
             {'kanban_state': 'blocked', 'stage_id': self.ref('maintenance.stage_0')},
             {'kanban_state': 'blocked', 'stage_id': self.ref('maintenance.stage_0')},
         ])
+
+    def test_done_maintenance_no_close_or_request_date(self):
+        """
+        Ensure equipment with done maintenance requests that have
+        `close_date` or `request_date` set to False can still be opened.
+        In theory this should never happen, but we should fail gracefully
+        in case these dates are forced set to False.
+        """
+
+        form = Form(self.env['maintenance.equipment'].with_user(self.manager))
+        form.name = "brain"
+        equipment = form.save()
+        form = Form(self.env['maintenance.request'].with_user(self.manager))
+        form.name = "improve efficiency"
+        form.equipment_id = equipment
+        form.maintenance_type = 'corrective'
+        maintenance = form.save()
+        self.assertTrue(maintenance.request_date)
+        self.assertFalse(maintenance.close_date)
+
+        maintenance.stage_id = self.ref('maintenance.stage_3')
+        self.assertTrue(maintenance.request_date)
+        self.assertTrue(maintenance.close_date)
+        form = Form(equipment)
+
+        # this shouldn't happen unless it's forced
+        maintenance.close_date = False
+        form = Form(equipment)
+        maintenance.close_date = fields.Date.today()
+        maintenance.request_date = False
+        form = Form(equipment)
+        maintenance.close_date = False
+        form = Form(equipment)
+
+    def test_no_duplicate_activity_on_stage_change(self):
+        """
+        Ensure that changing the stage of a maintenance request does not create duplicate activities.
+        """
+        maintenance_request = self.env['maintenance.request'].create({
+            'name': 'Test activity duplication',
+            'maintenance_type': 'preventive',
+            'recurring_maintenance': True,
+            'repeat_type': 'forever',
+            'schedule_date': fields.Date.today(),
+        })
+        maintenance_done_stage = self.env['maintenance.stage'].create({
+            'name': 'Done Stage',
+            'done': True,
+        })
+        self.assertEqual(len(maintenance_request.activity_ids), 1, "There should be one activity created for the maintenance request.")
+        maintenance_request.write({'stage_id': maintenance_done_stage.id})
+        new_request = self.env['maintenance.request'].search([
+            ('id', '!=', maintenance_request.id),
+            ('name', '=', maintenance_request.name),
+        ])
+        self.assertEqual(len(new_request), 1, "A recurring maintenance request should be created.")
+        self.assertEqual(
+            len(new_request.activity_ids),
+            1,
+            "The recurring maintenance request should have one activity.",
+        )
+        self.assertEqual(len(maintenance_request.activity_ids), 0, "There should be no activities after moving to a done stage.")

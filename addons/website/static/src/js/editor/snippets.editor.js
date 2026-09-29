@@ -327,6 +327,14 @@ const wSnippetMenu = weSnippetEditor.SnippetsMenu.extend({
                     if (res.isValid) {
                         await this.orm.write("website", [websiteId], {google_maps_api_key: valueAPIKey});
                         invalidated = true;
+                        if (apiKey) {
+                            this.notification.add(
+                                _t(
+                                    "Google Maps configuration has changed. Please reload the page for changes to take effect."
+                                ),
+                                { type: "warning", sticky: true }
+                            );
+                        }
                         if (close) {
                             close();
                         } else {
@@ -555,6 +563,19 @@ const wSnippetMenu = weSnippetEditor.SnippetsMenu.extend({
             selectedTextEl.classList.add(...optionClassList);
             let $snippet = null;
             try {
+                const commonAncestor = range.commonAncestorContainer;
+                const ancestorElement =
+                    commonAncestor.nodeType === 1 ? commonAncestor : commonAncestor.parentElement;
+                const backgroundColorParentEl = ancestorElement.closest(
+                    'font[style*="background-color"], font[style*="background-image"], font[class^="bg-"]'
+                );
+                if (backgroundColorParentEl?.textContent === commonAncestor.textContent) {
+                    // As long as we handle the same text content, we extend the
+                    // existing range to the `<font/>` boundaries to keep the
+                    // background color applied correctly.
+                    range.setStartBefore(backgroundColorParentEl);
+                    range.setEndAfter(backgroundColorParentEl);
+                }
                 range.surroundContents(selectedTextEl);
                 $snippet = $(selectedTextEl);
             } catch {

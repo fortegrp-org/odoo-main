@@ -180,8 +180,19 @@ ANY_IN = {'any': 'in', 'not any': 'not in'}
 TRUE_LEAF = (1, '=', 1)
 FALSE_LEAF = (0, '=', 1)
 
-TRUE_DOMAIN = [TRUE_LEAF]
-FALSE_DOMAIN = [FALSE_LEAF]
+
+class _ProtectedDomain(tuple):
+    __slots__ = ()
+    __hash__ = None
+
+    def __eq__(self, other): return list(self).__eq__(other)
+    def __add__(self, other): return tuple(self) + tuple(other) if isinstance(other, (list, tuple)) else NotImplemented
+    def __radd__(self, other): return tuple(other) + tuple(self) if isinstance(other, (list, tuple)) else NotImplemented
+    def copy(self): return list(self)
+
+
+TRUE_DOMAIN = _ProtectedDomain([TRUE_LEAF])
+FALSE_DOMAIN = _ProtectedDomain([FALSE_LEAF])
 
 SQL_OPERATORS = {
     '=': SQL('='),
@@ -1152,6 +1163,17 @@ class expression(object):
                     if len(path) > 1:
                         right = comodel._search([(path[1], operator, right)])
                         operator = 'in'
+                    if (
+                        operator in ('any', 'not any')
+                        and comodel is not None  # we have a comodel
+                        and isinstance(right, (list, tuple))  # the value is a domain
+                        and not field.related  # related fields handle any properly
+                    ):
+                        if field.type in ('many2many', 'one2many'):
+                            right = comodel.with_context(**field.context)._search(right)
+                        else:
+                            right = comodel.with_context(active_test=False)._search(right)
+                        operator = 'in' if operator == 'any' else 'not in'
                     domain = field.determine_domain(model, operator, right)
                     model._flush_search(domain)
 

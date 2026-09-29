@@ -552,7 +552,7 @@ export class PosStore extends Reactive {
                 delete this.toRefundLines[line.refunded_orderline_id];
             }
         }
-        if (this.isOpenOrderShareable() && removeFromServer) {
+        if ((this.isOpenOrderShareable() || order.server_id) && removeFromServer) {
             if (this.ordersToUpdateSet.has(order)) {
                 this.ordersToUpdateSet.delete(order);
             }
@@ -691,6 +691,17 @@ export class PosStore extends Reactive {
             return;
         }
         this.loadOpenOrders(this.open_orders_json);
+
+        const openIds = new Set(this.open_orders_json.map((o) => o.id));
+        for (const order of [...this.get_order_list()]) {
+            if (order.server_id && !openIds.has(order.server_id)) {
+                this.removeOrder(order, false);
+            }
+        }
+        if (!this.get_order_list().includes(this.selectedOrder)) {
+            this.selectedOrder = null;
+            this.set_start_order();
+        }
     }
     async _loadMissingProducts(orders) {
         const missingProductIds = new Set([]);
@@ -1814,7 +1825,8 @@ export class PosStore extends Reactive {
         return this.get_order().paymentlines.find(
             (paymentLine) =>
                 paymentLine.payment_method.use_payment_terminal === terminalName &&
-                !paymentLine.is_done()
+                !paymentLine.is_done() &&
+                paymentLine.get_payment_status() !== "retry"
         );
     }
     /**
@@ -1876,6 +1888,14 @@ export class PosStore extends Reactive {
         }
         await this._loadMissingPricelistItems(products);
         this._loadProductProduct(products);
+    }
+    async getProductById(productId) {
+        let product = this.db.get_product_by_id(productId);
+        if (!product) {
+            await this._addProducts([productId], false);
+            product = this.db.get_product_by_id(productId);
+        }
+        return product;
     }
     async _loadProductByIds(productIds) {
         return await this.orm.call("pos.session", "get_pos_ui_product_product_by_params", [
@@ -2198,6 +2218,10 @@ export class PosStore extends Reactive {
         this.searchProductWord = "";
         const { start_category, iface_start_categ_id } = this.config;
         this.selectedCategoryId = (start_category && iface_start_categ_id?.[0]) || 0;
+    }
+
+    getPhoneSearchFields() {
+        return ["phone", "mobile"];
     }
 }
 

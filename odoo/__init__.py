@@ -17,7 +17,7 @@ __path__ = [
 
 import sys
 MIN_PY_VERSION = (3, 10)
-MAX_PY_VERSION = (3, 12)
+MAX_PY_VERSION = (3, 14)
 assert sys.version_info > MIN_PY_VERSION, f"Outdated python version detected, Odoo requires Python >= {'.'.join(map(str, MIN_PY_VERSION))} to run."
 
 #----------------------------------------------------------
@@ -37,7 +37,7 @@ if len(sys.argv) > 1 and sys.argv[1] == 'gevent':
         # Copyright (C) 2010-2012 Daniele Varrazzo <daniele.varrazzo@gmail.com>
         # This function is borrowed from psycogreen module which is licensed
         # under the BSD license (see in odoo/debian/copyright)
-        while 1:
+        while True:
             state = conn.poll()
             if state == psycopg2.extensions.POLL_OK:
                 break

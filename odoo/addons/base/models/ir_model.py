@@ -137,7 +137,15 @@ def upsert_en(model, fnames, rows, conflict):
     conf = ", ".join(conflict)
     excluded = ", ".join(
         (
-            f"COALESCE({table}.{quote(fname)}, '{{}}'::jsonb) || EXCLUDED.{quote(fname)}"
+            f"""CASE
+                WHEN {table}.{quote(fname)}->>'en_US' IS DISTINCT FROM EXCLUDED.{quote(fname)}->>'en_US'
+                    -- the source text changed: existing translations were
+                    -- made for a source that no longer exists, drop them so
+                    -- they get reloaded fresh instead of being kept as if
+                    -- they still applied to the current source
+                    THEN EXCLUDED.{quote(fname)}
+                ELSE COALESCE({table}.{quote(fname)}, '{{}}'::jsonb) || EXCLUDED.{quote(fname)}
+               END"""
             if model._fields[fname].translate is True
             else f"EXCLUDED.{quote(fname)}"
         )
@@ -149,8 +157,6 @@ def upsert_en(model, fnames, rows, conflict):
         RETURNING id
     """
 
-    # for translated fields, we can actually erase the json value, as
-    # translations will be reloaded after this
     def identity(val):
         return val
 
@@ -340,6 +346,11 @@ class IrModel(models.Model):
         crons = self.env['ir.cron'].with_context(active_test=False).search([('model_id', 'in', self.ids)])
         if crons:
             crons.unlink()
+
+        # delete related ir_model_data
+        model_data = self.env['ir.model.data'].search([('model', 'in', self.mapped('model'))])
+        if model_data:
+            model_data.unlink()
 
         self._drop_table()
         res = super(IrModel, self).unlink()
@@ -995,11 +1006,16 @@ class IrModelFields(models.Model):
                 if relation and not IrModel._get_id(relation):
                     raise UserError(_("Model %s does not exist!", vals['relation']))
 
-                if vals.get('ttype') == 'one2many' and not self.search_count([
-                    ('ttype', '=', 'many2one'),
-                    ('model', '=', vals['relation']),
-                    ('name', '=', vals['relation_field']),
-                ]):
+                if (
+                    vals.get('ttype') == 'one2many' and
+                    vals.get("store", True) and
+                    not vals.get("related") and
+                    not self.search_count([
+                        ('ttype', '=', 'many2one'),
+                        ('model', '=', vals['relation']),
+                        ('name', '=', vals['relation_field']),
+                    ])
+                ):
                     raise UserError(_("Many2one %s on model %s does not exist!", vals['relation_field'], vals['relation']))
 
         if any(model in self.pool for model in models):
@@ -2254,6 +2270,7 @@ class IrModelData(models.Model):
 
         # query xml_ids by prefix
         result = []
+        self.flush_model()
         cr = self.env.cr
         for prefix, suffixes in bymodule.items():
             query = """
@@ -2407,12 +2424,15 @@ class IrModelData(models.Model):
                     else:
                         # the field is shared across registries; don't modify it
                         Field = type(field)
-                        field_ = Field(_base_fields=[field, Field(prefetch=False)])
+                        field_ = Field(_base_fields=(field, Field(prefetch=False)))
                         self.env[ir_field.model]._add_field(ir_field.name, field_)
                         field_.setup(model)
                         has_shared_field = True
         if has_shared_field:
-            lazy_property.reset_all(self.env.registry)
+            registry = self.env.registry
+            lazy_property.reset_all(registry)
+            registry._field_trigger_trees.clear()
+            registry._is_modifying_relations.clear()
 
         # to collect external ids of records that cannot be deleted
         undeletable_ids = []
@@ -2464,7 +2484,12 @@ class IrModelData(models.Model):
 
         # remove non-model records first, grouped by batches of the same model
         for model, items in itertools.groupby(unique(records_items), itemgetter(0)):
-            delete(self.env[model].browse(item[1] for item in items))
+            ids = [item[1] for item in items]
+            # we cannot guarantee that the ir.model.data points to an existing model
+            if model in self.env:
+                delete(self.env[model].browse(ids))
+            else:
+                _logger.info("Orphan ir.model.data records %s refer to unavailable model '%s'", ids, model)
 
         # Remove copied views. This must happen after removing all records from
         # the modules to remove, otherwise ondelete='restrict' may prevent the

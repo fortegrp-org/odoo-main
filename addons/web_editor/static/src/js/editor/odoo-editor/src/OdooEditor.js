@@ -86,6 +86,7 @@ import {
     isLinkEligibleForZwnbsp,
     isZwnbsp,
     fixInvalidHTML,
+    childNodeIndex,
 } from './utils/utils.js';
 import { editorCommands } from './commands/commands.js';
 import { Powerbox } from './powerbox/Powerbox.js';
@@ -337,6 +338,8 @@ export class OdooEditor extends EventTarget {
             editable.innerHTML = '<p><br></p>';
         }
         this.initElementForEdition(editable);
+
+        this.lastSavePoint = null;
 
         // Convention: root node is ID root.
         editable.oid = 'root';
@@ -893,11 +896,11 @@ export class OdooEditor extends EventTarget {
         }
     }
 
-    resetContent(value) {
+    resetContent(value, isSavePoint = true) {
         value = value || '<p><br></p>';
         this.editable.innerHTML = fixInvalidHTML(value);
         this.sanitize(this.editable);
-        this.historyStep(true);
+        this.historyStep(true, { isSavePoint });
         // The unbreakable protection mechanism detects an anomaly and attempts
         // to trigger a rollback when the content is reset using `innerHTML`.
         // Prevent this rollback as it would otherwise revert the new content.
@@ -1051,7 +1054,7 @@ export class OdooEditor extends EventTarget {
                 clearTimeout(this.observerTimeout);
                 if (this._observerTimeoutUnactive.size === 0) {
                     this.observerTimeout = setTimeout(() => {
-                        this.historyStep();
+                        this.historyStep(false);
                     }, 100);
                 }
                 this.observerApply(records);
@@ -1330,7 +1333,7 @@ export class OdooEditor extends EventTarget {
     }
 
     // One step completed: apply to vDOM, setup next history step
-    historyStep(skipRollback = false, { stepId } = {}) {
+    historyStep(skipRollback = false, { stepId, restoredStepId, isSavePoint } = {}) {
         if (!this._historyStepsActive) {
             return;
         }
@@ -1351,6 +1354,8 @@ export class OdooEditor extends EventTarget {
         const previousStep = peek(this._historySteps);
         currentStep.clientId = this._collabClientId;
         currentStep.previousStepId = previousStep.id;
+        currentStep.isSavePoint = isSavePoint;
+        currentStep.restoredStepId = restoredStepId;
 
         this._historySteps.push(currentStep);
         if (this.options.onHistoryStep) {
@@ -1469,7 +1474,7 @@ export class OdooEditor extends EventTarget {
             // Consider the last position of the history as an undo.
             const stepId = this._generateId();
             this._historyStepsStates.set(stepId, 'undo');
-            this.historyStep(true, { stepId });
+            this.historyStep(true, { stepId, restoredStepId: this._historySteps[pos].previousStepId });
             this.dispatchEvent(new Event('historyUndo'));
         }
     }
@@ -1493,7 +1498,7 @@ export class OdooEditor extends EventTarget {
             this.historySetSelection(this._historySteps[pos]);
             const stepId = this._generateId();
             this._historyStepsStates.set(stepId, 'redo');
-            this.historyStep(true, { stepId });
+            this.historyStep(true, { stepId, restoredStepId: this._historySteps[pos].previousStepId });
             this.dispatchEvent(new Event('historyRedo'));
         }
     }
@@ -1561,10 +1566,10 @@ export class OdooEditor extends EventTarget {
                         }
                         this.idSet(nodeToRemove);
                     }
-                    if (mutation.nextId && this.idFind(mutation.nextId)?.isConnected) {
+                    if (mutation.nextId && this.idFind(mutation.nextId)?.parentElement) {
                         const node = this.idFind(mutation.nextId);
                         node && node.before(nodeToRemove);
-                    } else if (mutation.previousId && this.idFind(mutation.previousId)?.isConnected) {
+                    } else if (mutation.previousId && this.idFind(mutation.previousId)?.parentElement) {
                         const node = this.idFind(mutation.previousId);
                         node && node.after(nodeToRemove);
                     } else {
@@ -2246,6 +2251,10 @@ export class OdooEditor extends EventTarget {
             && (startBlock.tagName !== 'TD' && endBlock.tagName !== 'TD')
             && !(firstLeafOfStartBlock === start && lastLeafOfEndBlock === end);
         let next = nextLeaf(end, this.editable);
+        if (isBlock(end)) {
+            // end can be block so we take the next leaf at the endOffset
+            next = nextLeaf(end.childNodes[endOffset], this.editable);
+        }
 
         // Get the boundaries of the range so as to get the state to restore.
         if (end.nodeType === Node.TEXT_NODE) {
@@ -2366,6 +2375,7 @@ export class OdooEditor extends EventTarget {
             doJoin &&
             next &&
             !(next.previousSibling && next.previousSibling === joinWith) &&
+            !(joinWith.nodeType === Node.ELEMENT_NODE && joinWith.contains(next) && childNodeIndex(next) === range.endOffset) &&
             this.editable.contains(next) && (closestElement(joinWith,'TD') === closestElement(next, 'TD'))
         ) {
             const restore = preserveCursor(this.document);
@@ -2978,7 +2988,9 @@ export class OdooEditor extends EventTarget {
                 const sizeDelta = newSize - currentSize;
                 const currentNeighborSize = neighborRect[sizeProp];
                 const newNeighborSize = currentNeighborSize - sizeDelta;
-                const maxWidth = this.editable.clientWidth - pxToFloat(editableStyle.paddingLeft) - pxToFloat(editableStyle.paddingRight);
+                const enclosingCell = closestElement(table, "td, th");
+                const containerWidth = enclosingCell?.getBoundingClientRect().width || this.editable.clientWidth;
+                const maxWidth = containerWidth - pxToFloat(editableStyle.paddingLeft) - pxToFloat(editableStyle.paddingRight);
                 const tableRect = table.getBoundingClientRect();
                 if (newSize > MIN_SIZE &&
                         // prevent resizing horizontally beyond the bounds of
@@ -3241,6 +3253,10 @@ export class OdooEditor extends EventTarget {
         }
 
         const sel = this.document.getSelection();
+        if (sel === null) {
+            // The iframe is no longer in the document => no need to do anything.
+            return;
+        }
         if (!hasTableSelection(this.editable)) {
             if (this.editable.classList.contains('o_col_resize') || this.editable.classList.contains('o_row_resize')) {
                 show = false;
@@ -3401,6 +3417,7 @@ export class OdooEditor extends EventTarget {
         const isInMedia = this.toolbar.classList.contains('oe-media');
         const linkNode = getInSelection(this.document, 'a');
         const linkButton = this.toolbar.querySelector('#create-link');
+        const transformButton = this.toolbar.querySelector("#image-transform");
         linkButton && linkButton.classList.toggle('active', !!linkNode);
         // Hide unlink button if no link in selection, always hide on media
         // elements.
@@ -3416,7 +3433,9 @@ export class OdooEditor extends EventTarget {
         const range = getDeepRange(this.editable, { sel, correctTripleClick: true });
         const spansBlocks = [...range.commonAncestorContainer.childNodes].some(isBlock);
         linkButton?.classList.toggle('d-none', spansBlocks || isInMedia);
-
+        if (this.options.disableTransform) {
+            transformButton.classList.add("d-none");
+        }
         // Hide link button group if it has no visible button.
         const linkBtnGroup = this.toolbar.querySelector('#link.btn-group');
         linkBtnGroup?.classList.toggle('d-none', !linkBtnGroup.querySelector('.btn:not(.d-none)'));
@@ -3875,7 +3894,23 @@ export class OdooEditor extends EventTarget {
                 this.historyRollback();
                 ev.preventDefault();
                 this._handleAutomaticLinkInsertion();
-                getDeepRange(this.editable, { select: true, correctTripleClick: true });
+                const deepRange = getDeepRange(this.editable, { correctTripleClick: true });
+                const startEl = deepRange && closestElement(deepRange.startContainer);
+                const endEl = deepRange && closestElement(deepRange.endContainer);
+                if (startEl && endEl && startEl.isContentEditable && endEl.isContentEditable) {
+                    const { startContainer, startOffset, endContainer, endOffset } = deepRange;
+                    const direction = getCursorDirection(
+                        newSelection.anchorNode,
+                        newSelection.anchorOffset,
+                        newSelection.focusNode,
+                        newSelection.focusOffset
+                    );
+                    if (direction === DIRECTIONS.RIGHT) {
+                        setSelection(startContainer, startOffset, endContainer, endOffset);
+                    } else {
+                        setSelection(endContainer, endOffset, startContainer, startOffset);
+                    }
+                }
                 // To remove only the anchor cell's content when multiple table cells are selected on Enter,
                 // we need to change the selection to focus only on the anchor cell. This can't be done in `oEnter`
                 // because `deleteRange` responsible for removing content, execute before `oEnter` in `_applyRawCommand`.

@@ -1,7 +1,7 @@
 # Translation of Odoo Server.
 # This file contains the translation of the following modules:
 # 	* base_import
-# 
+#
 # Translators:
 # Emanuel Bruda, 2024
 # Cozmin Candea <office@terrabit.ro>, 2024
@@ -10,20 +10,24 @@
 # Alin Miclea, 2024
 # Dorin Hongu <dhongu@gmail.com>, 2024
 # Lyall Kindmurr, 2024
-# 
+# Larisa_nexterp, 2025
+#
 msgid ""
 msgstr ""
 "Project-Id-Version: Odoo Server 17.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-02-10 10:34+0000\n"
-"PO-Revision-Date: 2023-10-26 23:09+0000\n"
-"Last-Translator: Lyall Kindmurr, 2024\n"
-"Language-Team: Romanian (https://app.transifex.com/odoo/teams/41243/ro/)\n"
+"POT-Creation-Date: 2026-08-14 17:37+0000\n"
+"PO-Revision-Date: 2026-08-08 10:05+0000\n"
+"Last-Translator: Anonymous <noreply@weblate.org>\n"
+"Language-Team: Romanian <https://translate.odoo.com/projects/odoo-17/"
+"base_import/ro/>\n"
+"Language: ro\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: \n"
-"Language: ro\n"
-"Plural-Forms: nplurals=3; plural=(n==1?0:(((n%100>19)||((n%100==0)&&(n!=0)))?2:1));\n"
+"Plural-Forms: nplurals=3; plural=n==1 ? 0 : (n==0 || (n%100 > 0 && n%100 < "
+"20)) ? 1 : 2;\n"
+"X-Generator: Weblate 2026.6.1\n"
 
 #. module: base_import
 #. odoo-javascript
@@ -77,8 +81,8 @@ msgstr "Permite potrivirea cu subcâmpuri"
 #, python-format
 msgid ""
 "An unknown issue occurred during import (possibly lost connection, data "
-"limit exceeded or memory limits exceeded). Please retry in case the issue is"
-" transient. If the issue still occurs, try to split the file rather than "
+"limit exceeded or memory limits exceeded). Please retry in case the issue is "
+"transient. If the issue still occurs, try to split the file rather than "
 "import it at once."
 msgstr ""
 "A apărut o problemă necunoscută în timpul importului (posibil conexiune "
@@ -136,8 +140,7 @@ msgstr "Anulează"
 #, python-format
 msgid "Click 'Resume' to proceed with the import, resuming at line %s."
 msgstr ""
-"Faceți clic pe „Reluare” pentru a continua cu importul, reluând la rândul "
-"%s."
+"Faceți clic pe „Reluare” pentru a continua cu importul, reluând la rândul %s."
 
 #. module: base_import
 #. odoo-python
@@ -161,8 +164,6 @@ msgstr "Etichetă coloană"
 #. module: base_import
 #. odoo-javascript
 #: code:addons/base_import/static/src/import_model.js:0
-#: code:addons/base_import/static/src/import_model.js:0
-#: code:addons/base_import/static/src/import_model.js:0
 #, python-format
 msgid "Comma"
 msgstr "Virgulă"
@@ -179,8 +180,7 @@ msgstr "Comentarii"
 #: code:addons/base_import/models/base_import.py:0
 #, python-format
 msgid ""
-"Could not retrieve URL: %(url)s [%(field_name)s: L%(line_number)d]: "
-"%(error)s"
+"Could not retrieve URL: %(url)s [%(field_name)s: L%(line_number)d]: %(error)s"
 msgstr ""
 "Nu s-a putut prelua URL-ul: %(url)s [%(field_name)s: L%(line_number)d]: "
 "%(error)s"
@@ -206,7 +206,6 @@ msgstr "Creat pe"
 
 #. module: base_import
 #. odoo-python
-#: code:addons/base_import/models/base_import.py:0
 #: code:addons/base_import/models/base_import.py:0
 #, python-format
 msgid "Database ID"
@@ -242,7 +241,6 @@ msgstr "Nume afișat"
 #. module: base_import
 #. odoo-javascript
 #: code:addons/base_import/static/src/import_model.js:0
-#: code:addons/base_import/static/src/import_model.js:0
 #, python-format
 msgid "Dot"
 msgstr "Punct"
@@ -250,8 +248,6 @@ msgstr "Punct"
 #. module: base_import
 #. odoo-javascript
 #: code:addons/base_import/static/src/import_action/import_action.xml:0
-#: code:addons/base_import/static/src/import_action/import_action.xml:0
-#: code:addons/base_import/static/src/import_data_sidepanel/import_data_sidepanel.xml:0
 #: code:addons/base_import/static/src/import_data_sidepanel/import_data_sidepanel.xml:0
 #, python-format
 msgid "Download"
@@ -298,8 +294,8 @@ msgid ""
 "the separator character."
 msgstr ""
 "Eroare la importul înregistrărilor: toate rândurile trebuie să aibă aceeași "
-"dimensiune, dar rândul de titlu are %d intrări în timp ce primul rând are%d."
-" Poate fi necesar să schimbați caracterul separatorului."
+"dimensiune, dar rândul de titlu are %d intrări în timp ce primul rând are%d. "
+"Poate fi necesar să schimbați caracterul separatorului."
 
 #. module: base_import
 #. odoo-javascript
@@ -324,7 +320,6 @@ msgstr "Fișierele Excel sunt recomandate deoarece formatarea este automată."
 
 #. module: base_import
 #. odoo-python
-#: code:addons/base_import/models/base_import.py:0
 #: code:addons/base_import/models/base_import.py:0
 #, python-format
 msgid "External ID"
@@ -359,7 +354,6 @@ msgstr "Tip fișier"
 
 #. module: base_import
 #. odoo-python
-#: code:addons/base_import/models/base_import.py:0
 #: code:addons/base_import/models/base_import.py:0
 #, python-format
 msgid "File size exceeds configured maximum (%s bytes)"
@@ -398,8 +392,8 @@ msgstr "Formatare"
 #: code:addons/base_import/models/base_import.py:0
 #, python-format
 msgid ""
-"Found invalid image data, images should be imported as either URLs or "
-"base64-encoded data."
+"Found invalid image data, images should be imported as either URLs or base64-"
+"encoded data."
 msgstr ""
 "Datele imaginii nu sunt valide, imaginile trebuie importate ca URL-uri sau "
 "date codificate în baza64."
@@ -454,19 +448,9 @@ msgid ""
 "If the model uses openchatter, history tracking will set up subscriptions "
 "and send notifications during the import, but lead to a slower import."
 msgstr ""
-"Dacă modelul folosește openchatter, urmărirea istoricului va seta abonamente"
-" și va trimite notificări în timpul importului, dar va duce la un import mai"
-" lent."
-
-#. module: base_import
-#. odoo-python
-#: code:addons/base_import/models/base_import.py:0
-#, python-format
-msgid ""
-"Image size excessive, imported images must be smaller than 42 million pixel"
-msgstr ""
-"Dimensiunea imaginii este excesivă, imaginile importate trebuie să fie mai "
-"mici de 42 de milioane de pixeli"
+"Dacă modelul folosește openchatter, urmărirea istoricului va seta abonamente "
+"și va trimite notificări în timpul importului, dar va duce la un import mai "
+"lent."
 
 #. module: base_import
 #. odoo-javascript
@@ -532,16 +516,17 @@ msgid ""
 "Invalid cell format at row %(row)s, column %(col)s: %(cell_value)s, with "
 "format: %(cell_format)s, as (%(format_type)s) formats are not supported."
 msgstr ""
+"Format de celulă invalid la rândul %(row)s, coloana %(col)s: %(cell_value)s, "
+"cu format: %(cell_format)s, deoarece formatele de tip (%(format_type)s) nu "
+"sunt suportate."
 
 #. module: base_import
 #. odoo-python
 #: code:addons/base_import/models/base_import.py:0
-#: code:addons/base_import/models/base_import.py:0
 #, python-format
 msgid "Invalid cell value at row %(row)s, column %(col)s: %(cell_value)s"
 msgstr ""
-"Valoare invalidă a celulei la rândul %(row)s, coloana %(col)s: "
-"%(cell_value)s"
+"Valoare invalidă a celulei la rândul %(row)s, coloana %(col)s: %(cell_value)s"
 
 #. module: base_import
 #: model:ir.model.fields,field_description:base_import.field_base_import_import__write_uid
@@ -736,7 +721,6 @@ msgstr "Foaie:"
 #. module: base_import
 #. odoo-javascript
 #: code:addons/base_import/static/src/import_data_options/import_data_options.js:0
-#: code:addons/base_import/static/src/import_data_options/import_data_options.js:0
 #, python-format
 msgid "Skip record"
 msgstr "Săriți înregistrarea"
@@ -764,7 +748,6 @@ msgstr "Începe de la linia"
 
 #. module: base_import
 #. odoo-javascript
-#: code:addons/base_import/static/src/import_data_progress/import_data_progress.xml:0
 #: code:addons/base_import/static/src/import_data_progress/import_data_progress.xml:0
 #, python-format
 msgid "Stop Import"
@@ -858,7 +841,8 @@ msgstr "Urmărește istoric în timpul importului"
 #. odoo-python
 #: code:addons/base_import/models/base_import.py:0
 #, python-format
-msgid "Unable to load \"{extension}\" file: requires Python module \"{modname}\""
+msgid ""
+"Unable to load \"{extension}\" file: requires Python module \"{modname}\""
 msgstr ""
 "Nu se poate încărca fișierul \"{extension}\": este necesar modulul Python "
 "\"{modname}\""
@@ -870,8 +854,8 @@ msgstr ""
 msgid ""
 "Unsupported file format \"{}\", import only supports CSV, ODS, XLS and XLSX"
 msgstr ""
-"Format fișier nesuportat \"{}\", import suportat numai pentru  CSV, ODS, XLS"
-" și XLSX"
+"Format fișier nesuportat \"{}\", import suportat numai pentru  CSV, ODS, XLS "
+"și XLSX"
 
 #. module: base_import
 #. odoo-javascript
@@ -900,8 +884,8 @@ msgstr "Încarcă un fișier Excel sau CSV pentru import"
 #, python-format
 msgid ""
 "Use HH for hours in a 24h system, use II in conjonction with 'p' for a 12h "
-"system. You can use a custom format in addition to the suggestions provided."
-" Leave empty to let Odoo guess the format (recommended)"
+"system. You can use a custom format in addition to the suggestions provided. "
+"Leave empty to let Odoo guess the format (recommended)"
 msgstr ""
 "Utilizați HH timp de ore într-un sistem de 24 de ore, utilizați II în "
 "combinație cu „p” pentru un sistem de 12 ore. Puteți utiliza un format "
@@ -913,10 +897,10 @@ msgstr ""
 #: code:addons/base_import/static/src/import_model.js:0
 #, python-format
 msgid ""
-"Use YYYY to represent the year, MM for the month and DD for the day. Include"
-" separators such as a dot, forward slash or dash. You can use a custom "
-"format in addition to the suggestions provided. Leave empty to let Odoo "
-"guess the format (recommended)"
+"Use YYYY to represent the year, MM for the month and DD for the day. Include "
+"separators such as a dot, forward slash or dash. You can use a custom format "
+"in addition to the suggestions provided. Leave empty to let Odoo guess the "
+"format (recommended)"
 msgstr ""
 "Utilizați aaaa pentru a reprezenta anul, LL pentru lună și ZZ pentru zi. "
 "Include separatoare, cum ar fi un punct, o bară oblică înainte sau o bară "
@@ -1033,3 +1017,11 @@ msgstr "secunde"
 #, python-format
 msgid "unknown error code %s"
 msgstr "cod de eroare necunoscut %s"
+
+#, python-format
+#~ msgid ""
+#~ "Image size excessive, imported images must be smaller than 42 million "
+#~ "pixel"
+#~ msgstr ""
+#~ "Dimensiunea imaginii este excesivă, imaginile importate trebuie să fie "
+#~ "mai mici de 42 de milioane de pixeli"

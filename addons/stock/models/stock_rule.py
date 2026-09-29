@@ -58,7 +58,7 @@ class StockRule(models.Model):
     sequence = fields.Integer('Sequence', default=20)
     company_id = fields.Many2one('res.company', 'Company',
         default=lambda self: self.env.company,
-        domain="[('id', '=?', route_company_id)]")
+        domain="[('id', '=?', route_company_id)]", index=True)
     location_dest_id = fields.Many2one('stock.location', 'Destination Location', required=True, check_company=True, index=True)
     location_src_id = fields.Many2one('stock.location', 'Source Location', check_company=True, index=True)
     route_id = fields.Many2one('stock.route', 'Route', required=True, ondelete='cascade', index=True)
@@ -643,12 +643,11 @@ class ProcurementGroup(models.Model):
         # Minimum stock rules
         domain = self._get_orderpoint_domain(company_id=company_id)
         orderpoints = self.env['stock.warehouse.orderpoint'].search(domain)
-        # ensure that qty_* which depends on datetime.now() are correctly
-        # recomputed
-        orderpoints.sudo()._compute_qty_to_order()
         if use_new_cursor:
             self._cr.commit()
-        orderpoints.sudo()._procure_orderpoint_confirm(use_new_cursor=use_new_cursor, company_id=company_id, raise_user_error=False)
+        orderpoints.sudo().with_context(recompute_qty_to_order=True)._procure_orderpoint_confirm(
+            use_new_cursor=use_new_cursor, company_id=company_id, raise_user_error=False
+        )
 
         # Search all confirmed stock_moves and try to assign them
         domain = self._get_moves_to_assign_domain(company_id)

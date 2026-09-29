@@ -1,3 +1,5 @@
+from lxml import etree
+import re
 from types import SimpleNamespace
 
 from odoo import models
@@ -11,21 +13,6 @@ from odoo.tools.float_utils import float_round
 JO_CURRENCY = SimpleNamespace(name='JO')
 
 JO_MAX_DP = 9
-
-PAYMENT_CODES_MAP = {
-    'income': {
-        'cash': '011',
-        'receivable': '021',
-    },
-    'sales': {
-        'cash': '012',
-        'receivable': '022',
-    },
-    'special': {
-        'cash': '013',
-        'receivable': '023',
-    }
-}
 
 
 class AccountEdiXmlUBL21JO(models.AbstractModel):
@@ -41,26 +28,37 @@ class AccountEdiXmlUBL21JO(models.AbstractModel):
         return float_round(value, JO_MAX_DP)
 
     def _get_line_amount_before_discount_jod(self, line):
-        amount_after_discount = abs(line.balance)
-        return (amount_after_discount / (1 - line.discount / 100)) \
-            if line.discount < 100 else line.currency_id._convert(
-            from_amount=line.price_unit * line.quantity,
-            to_currency=self.env.ref('base.JOD'),
-            company=line.company_id,
-            date=line.date,
-        )
+        if line.discount < 100 and line.tax_ids:
+            taxes_res = line.tax_ids.with_context({'round_base': False}).compute_all(
+                line.price_unit,
+                quantity=line.quantity,
+                currency=line.currency_id,
+                product=line.product_id,
+                partner=line.partner_id,
+                is_refund=line.is_refund,
+            )
+            return taxes_res['total_excluded']
+        else:
+            # reported numbers won't matter if discount is 100%
+            return line.price_unit * line.quantity
 
     def _get_line_discount_jod(self, line):
         return self._get_line_amount_before_discount_jod(line) * line.discount / 100
 
     def _get_unit_price_jod(self, line):
+        if not line.quantity:
+            return 0
         return self._get_line_amount_before_discount_jod(line) / line.quantity
 
     def _get_line_taxable_amount(self, line):
         return self._round_max_dp(self._get_unit_price_jod(line)) * self._round_max_dp(line.quantity) - self._round_max_dp(self._get_line_discount_jod(line))
 
     def _get_payment_method_code(self, invoice):
-        return PAYMENT_CODES_MAP[invoice.company_id.l10n_jo_edi_taxpayer_type]['receivable']
+        return invoice._get_invoice_scope_code() + invoice._get_invoice_payment_method_code() + invoice._get_invoice_tax_payer_type_code()
+
+    def _get_line_edi_id(self, line, default_id):
+        # only kept for stable policy, would be removed in FWs
+        return default_id
 
     def _aggregate_totals(self, vals):
         """
@@ -92,6 +90,9 @@ class AccountEdiXmlUBL21JO(models.AbstractModel):
         vals['monetary_total_vals']['tax_inclusive_amount'] = vals['monetary_total_vals']['payable_amount'] = tax_inclusive_amount
         vals['monetary_total_vals']['tax_exclusive_amount'] = tax_exclusive_amount
 
+    def _sanitize_phone(self, raw):
+        return re.sub(r'[^0-9]', '', raw or '')[:15]
+
     ########################################################
     # overriding vals methods of account_edi_xml_ubl_20 file
     ########################################################
@@ -103,8 +104,8 @@ class AccountEdiXmlUBL21JO(models.AbstractModel):
 
     def _get_partner_party_identification_vals_list(self, partner):
         return [{
-            'id_attrs': {'schemeID': 'TN' if not partner.country_code or partner.country_code == 'JO' else 'PN'},
-            'id': partner.vat if partner.vat and partner.vat != '/' else '',
+            'id_attrs': {'schemeID': 'TN' if partner.country_code == 'JO' else 'PN'},
+            'id': partner.vat if partner.vat and partner.vat != '/' else 'NO_VAT',
         }]
 
     def _get_partner_address_vals(self, partner):
@@ -149,7 +150,7 @@ class AccountEdiXmlUBL21JO(models.AbstractModel):
             return [{
                 'payment_means_code': 10,
                 'payment_means_code_attrs': {'listID': "UN/ECE 4461"},
-                'instruction_note': invoice.ref.replace('/', '_') if invoice.ref else '',
+                'instruction_note': (invoice.ref or '').replace('/', '_'),
             }]
         else:
             return []
@@ -186,7 +187,7 @@ class AccountEdiXmlUBL21JO(models.AbstractModel):
             return []
 
         special_tax_amount_per_line = {
-            line: line_tax['tax_amount']
+            line: line_tax['tax_amount_currency']
             for line, line_vals in taxes_vals['tax_details_per_record'].items()
             for line_tax in line_vals['tax_details'].values()
             if 'tax_amount_type' in line_tax and line_tax['tax_amount_type'] == 'fixed'
@@ -198,7 +199,7 @@ class AccountEdiXmlUBL21JO(models.AbstractModel):
 
     def _get_invoice_line_item_vals(self, line, taxes_vals):
         product = line.product_id
-        description = line.name and line.name.replace('\n', ', ')
+        description = (line.name or '').replace('\n', ', ')
         return {
             'name': product.name or description,
         }
@@ -248,7 +249,7 @@ class AccountEdiXmlUBL21JO(models.AbstractModel):
         for grouping_key, tax_details_vals in taxes_vals['tax_details'].items():
             if grouping_key['tax_amount_type'] == 'fixed':
                 taxable_amount = sum(self._round_max_dp(self._get_line_taxable_amount(line)) for line in tax_details_vals['records'])
-                special_tax_amount = tax_details_vals['tax_amount']
+                special_tax_amount = tax_details_vals['tax_amount_currency']
                 special_tax_subtotal = {
                     'currency': JO_CURRENCY,
                     'currency_dp': self._get_currency_decimal_places(),
@@ -266,7 +267,7 @@ class AccountEdiXmlUBL21JO(models.AbstractModel):
         return {
             'currency': JO_CURRENCY,
             'currency_dp': self._get_currency_decimal_places(),
-            'id': line_id + 1,
+            'id': line_id,
             'line_quantity': line.quantity,
             'line_quantity_attrs': {'unitCode': self._get_uom_unece_code()},
             'line_extension_amount': self._get_line_taxable_amount(line),
@@ -291,11 +292,8 @@ class AccountEdiXmlUBL21JO(models.AbstractModel):
         if amount is None:
             return None
 
-        def get_decimal_places(number):
-            return len(f'{float(number)}'.split('.')[1])
-
         rounded_amount = float_repr(self._round_max_dp(amount), JO_MAX_DP).rstrip('0').rstrip('.')
-        decimal_places = get_decimal_places(rounded_amount)
+        decimal_places = len(rounded_amount.split('.')[1]) if '.' in rounded_amount else 0
         if decimal_places < precision_digits:
             rounded_amount = float_repr(float(rounded_amount), precision_digits)
         return rounded_amount
@@ -348,9 +346,9 @@ class AccountEdiXmlUBL21JO(models.AbstractModel):
             return {}
 
         return {
-            'id': invoice.reversed_entry_id.name.replace('/', '_'),
+            'id': (invoice.reversed_entry_id.name or '').replace('/', '_'),
             'uuid': invoice.reversed_entry_id.l10n_jo_edi_uuid,
-            'document_description': self.format_float(abs(invoice.reversed_entry_id.amount_total_signed), self._get_currency_decimal_places()),
+            'document_description': self.format_float(abs(invoice.reversed_entry_id.amount_total), self._get_currency_decimal_places()),
         }
 
     def _get_additional_document_reference_list(self, invoice):
@@ -368,6 +366,34 @@ class AccountEdiXmlUBL21JO(models.AbstractModel):
     # export methods
     ####################################################
 
+    def _enumerate_invoice_lines(self, invoice, start=0):
+        if invoice.move_type == 'out_refund':
+            invoice_edi_id_x_line = dict(self._enumerate_invoice_lines(invoice.reversed_entry_id, start=start))
+            overflow_edi_id = len(invoice_edi_id_x_line) + 1
+
+            refund_edi_id_x_line = {}
+            refund_lines = invoice.invoice_line_ids.filtered(lambda line: line.display_type not in ('line_note', 'line_section'))
+            for refund_line in refund_lines:
+                matching_edi_ids = [
+                    line_id for line_id, line in invoice_edi_id_x_line.items()
+                    if line.product_id == refund_line.product_id
+                    and line.price_unit == refund_line.price_unit
+                    and line.discount == refund_line.discount
+                    and line.quantity >= refund_line.quantity
+                ]
+
+                if matching_edi_ids:
+                    edi_id = min(matching_edi_ids, key=lambda line_id: invoice_edi_id_x_line[line_id].quantity)
+                    refund_edi_id_x_line[edi_id] = refund_line
+                    invoice_edi_id_x_line.pop(edi_id)
+                else:
+                    refund_edi_id_x_line[overflow_edi_id] = refund_line
+                    overflow_edi_id += 1
+
+            return refund_edi_id_x_line.items()
+        else:
+            return super()._enumerate_invoice_lines(invoice, 1)
+
     def _export_invoice_vals(self, invoice):
         vals = super()._export_invoice_vals(invoice)
 
@@ -382,6 +408,7 @@ class AccountEdiXmlUBL21JO(models.AbstractModel):
         customer = invoice.partner_id
         is_refund = invoice.move_type == 'out_refund'
 
+        invoice._compute_l10n_jo_edi_uuid()
         vals['vals'].update({
             'ubl_version_id': '',
             'order_reference': '',
@@ -389,14 +416,14 @@ class AccountEdiXmlUBL21JO(models.AbstractModel):
             'profile_id': 'reporting:1.0',
             'id': invoice.name.replace('/', '_'),
             'uuid': invoice.l10n_jo_edi_uuid,
-            'document_currency_code': 'JOD',
-            'tax_currency_code': 'JOD',
+            'document_currency_code': invoice.currency_id.name,
+            'tax_currency_code': invoice.currency_id.name,
             'document_type_code_attrs': {'name': self._get_payment_method_code(invoice)},
             'document_type_code': "381" if is_refund else "388",
             'accounting_customer_party_vals': {
-                'party_vals': self._get_empty_party_vals() if is_refund else self._get_partner_party_vals(customer, role='customer'),
+                'party_vals': self._get_partner_party_vals(customer, role='customer'),
                 'accounting_contact': {
-                    'telephone': '' if is_refund else invoice.partner_id.phone or invoice.partner_id.mobile,
+                    'telephone': self._sanitize_phone(invoice.partner_id.phone or invoice.partner_id.mobile),
                 },
             },
             'seller_supplier_party_vals': {
@@ -409,3 +436,17 @@ class AccountEdiXmlUBL21JO(models.AbstractModel):
         self._aggregate_totals(vals['vals'])
 
         return vals
+
+    def _export_invoice(self, invoice):
+        # EXTENDS account.edi.xml.ubl_21
+        # _export_invoice normally cleans up the xml to remove empty nodes.
+        # However, in the JO UBL version, we always want the PartyIdentification with ID nodes, even if empty.
+        # We'll replace the empty value by a dummy one so that the node doesn't get cleaned up and remove its content after the file generation.
+        xml, errors = super()._export_invoice(invoice)
+        xml_root = etree.fromstring(xml)
+        party_identification_id_elements = xml_root.findall('.//cac:PartyIdentification/cbc:ID', namespaces=xml_root.nsmap)
+        for element in party_identification_id_elements:
+            if element.text == 'NO_VAT':
+                element.text = ''
+        # method='html' is used to keep the element un-shortened ("<a></a>" instead of <a/>)
+        return etree.tostring(xml_root, method='html'), errors

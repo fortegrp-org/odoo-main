@@ -2734,6 +2734,49 @@ class TestMrpOrder(TestMrpCommon):
         self.assertEqual(workorder.time_ids[0].loss_type, 'productive', "Remaining time tracking should be productive")
         self.assertEqual(workorder.time_ids[0].duration, real_duration_decreased - real_duration_under_expected, "Time tracking duration should have been reduced to reflect new shorter duration")
 
+    def test_duration_handles_overlaps_and_loss_types(self):
+        """Duration must merge overlapping intervals by time type."""
+        mo = Form(self.env['mrp.production'])
+        mo.bom_id = self.bom_4
+        mo = mo.save()
+        mo.action_confirm()
+        workorder = mo.workorder_ids[0]
+
+        base_dt = datetime(2024, 1, 1, 8, 0, 0)
+        productive_loss = self.env.ref('mrp.block_reason7')  # productive
+        availability_loss = self.env.ref('mrp.block_reason0')  # availability
+
+        self.env['mrp.workcenter.productivity'].create([
+            {   # 08:00-09:00 productive (60 min)
+                'workorder_id': workorder.id,
+                'workcenter_id': workorder.workcenter_id.id,
+                'loss_id': productive_loss.id,
+                'date_start': base_dt,
+                'date_end': base_dt + timedelta(hours=1),
+            },
+            {   # 08:30-09:30 productive - overlaps previous by 30 min
+                'workorder_id': workorder.id,
+                'workcenter_id': workorder.workcenter_id.id,
+                'loss_id': productive_loss.id,
+                'date_start': base_dt + timedelta(minutes=30),
+                'date_end': base_dt + timedelta(hours=1, minutes=30),
+            },
+            {   # 09:00-10:00 availability (60 min) - must NOT be counted in the same interval
+                'workorder_id': workorder.id,
+                'workcenter_id': workorder.workcenter_id.id,
+                'loss_id': availability_loss.id,
+                'date_start': base_dt + timedelta(hours=1),
+                'date_end': base_dt + timedelta(hours=2),
+            },
+        ])
+
+        # Merged productive pool: 08:00-09:30 = 90 min (overlap deduplicated)
+        # Availability alone = 60 min
+        self.assertAlmostEqual(
+            workorder.duration, 150.0, places=1,
+            msg="Overlapping productive intervals must be merged; availability must be completelly added",
+        )
+
     def test_propagate_quantity_on_backorders(self):
         """Create a MO for a product with several work orders.
         Produce different quantities to test quantity propagation and workorder cancellation.
@@ -3632,6 +3675,17 @@ class TestMrpOrder(TestMrpCommon):
         mo.action_confirm()
         self.assertEqual(mo.state, 'confirmed')
         self.assertEqual(len(mo.workorder_ids), 2)
+
+    def test_unlink_update_workcenter_productivity(self):
+        """ Test that workcenter_productivity entries for deleted work order has end date set
+        """
+        mo_form = Form(self.env['mrp.production'])
+        mo_form.bom_id = self.bom_3
+        mo = mo_form.save()
+        mo.workorder_ids[0].button_start()
+        time_log = mo.workorder_ids[0].time_ids[0]
+        mo.workorder_ids[0].unlink()
+        self.assertIsNot(time_log.date_end, False)
 
     def test_consumption_action_set_qty_and_validate(self):
         """
@@ -4651,6 +4705,31 @@ class TestMrpOrder(TestMrpCommon):
         with Form(mo) as production_form:
             production_form.date_start = original_start_date
         self.assertEqual(mo.date_start, original_start_date)
+
+    def test_json_popover_with_workorder_dependence(self):
+        """
+        Check that json_popover is correctly computed for workorders with dependencies
+        """
+        bom = self.env['mrp.bom'].create({
+            'product_tmpl_id': self.product.product_tmpl_id.id,
+            'product_qty': 1,
+            'type': 'normal',
+            'allow_operation_dependencies': True,
+            'operation_ids': [
+                Command.create({'name': 'Super op 1', 'workcenter_id': self.workcenter_2.id, 'sequence': 1}),
+                Command.create({'name': 'Super op 2', 'workcenter_id': self.workcenter_2.id, 'sequence': 2}),
+                Command.create({'name': 'Super op 3', 'workcenter_id': self.workcenter_2.id, 'sequence': 2}),
+            ]
+        })
+        bom.operation_ids[-1].blocked_by_operation_ids = bom.operation_ids[:2]
+        mo = self.env['mrp.production'].create({'bom_id': bom.id})
+        mo.action_confirm()
+        date_start = fields.Date.today()
+        date_finished = fields.Date.today() + timedelta(days=5)
+        wos_to_set = mo.workorder_ids - mo.workorder_ids[1]
+        wos_to_set.write({'date_start': date_start, 'date_finished': date_finished})
+        self.assertTrue(mo.workorder_ids[-1].show_json_popover)
+
 
 @tagged('post_install', '-at_install')
 class TestMrpSynchronization(HttpCase):

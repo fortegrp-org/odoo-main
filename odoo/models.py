@@ -38,7 +38,7 @@ import re
 import uuid
 import warnings
 from collections import defaultdict, OrderedDict, deque
-from collections.abc import MutableMapping
+from collections.abc import Iterable, MutableMapping
 from contextlib import closing
 from inspect import getmembers, currentframe
 from operator import attrgetter, itemgetter
@@ -376,7 +376,7 @@ READ_GROUP_DISPLAY_FORMAT = {
     # Mixing both formats, e.g. 'MMM YYYY' would yield wrong results,
     # such as 2006-01-01 being formatted as "January 2005" in some locales.
     # Cfr: http://babel.pocoo.org/en/latest/dates.html#date-fields
-    'hour': 'hh:00 dd MMM',
+    'hour': 'HH:00 dd MMM',
     'day': 'dd MMM yyyy', # yyyy = normal year
     'week': "'W'w YYYY",  # w YYYY = ISO week-year
     'month': 'MMMM yyyy',
@@ -1123,7 +1123,7 @@ class BaseModel(metaclass=MetaModel):
                 for record, xid in self.env[model].browse(ids).__ensure_xml_id():
                     for i, j in xidmap.pop((record._name, record.id)):
                         lines[i][j] = xid
-            assert not xidmap, "failed to export xids for %s" % ', '.join('{}:{}' % it for it in xidmap.items())
+            assert not xidmap, "failed to export xids for %s" % ', '.join('%s:%s' % it for it in xidmap.items())
 
         return lines
 
@@ -1524,6 +1524,23 @@ class BaseModel(metaclass=MetaModel):
         for fname, value in defaults.items():
             if fname in self._fields:
                 field = self._fields[fname]
+                if (
+                    field.relational
+                    and not self.env.su
+                    and isinstance(value, Iterable)
+                ):
+                    # since the value will be converted into a SET, we still
+                    # need to check permissions for these actions
+                    for cmd in value:
+                        command_code = cmd[0] if isinstance(cmd, (tuple, list)) and len(cmd) >= 2 else None
+                        if command_code == Command.DELETE:
+                            record = self.env[field.comodel_name].browse(cmd[1])
+                            record.check_access_rights('unlink')
+                            record.check_access_rule('unlink')
+                        elif command_code == Command.UPDATE or (field.type == 'one2many' and command_code in (Command.UNLINK, Command.LINK)):
+                            record = self.env[field.comodel_name].browse(cmd[1])
+                            record.check_access_rights('write')
+                            record.check_access_rule('write')
                 value = field.convert_to_cache(value, self, validate=False)
                 defaults[fname] = field.convert_to_write(value, self)
 
@@ -1783,7 +1800,7 @@ class BaseModel(metaclass=MetaModel):
                     continue
                 try:
                     domains.append([(field_name, operator, field.convert_to_write(name, self))])
-                except ValueError:
+                except (ValueError, TypeError):
                     pass  # ignore that case if the value doesn't match the field type
             domain += aggregator(domains)
 
@@ -3358,7 +3375,7 @@ class BaseModel(metaclass=MetaModel):
                 # field is translated to avoid converting its column to varchar
                 # and losing data
                 translate = next((
-                    field.args['translate'] for field in reversed(fields_) if 'translate' in field.args
+                    field._args__['translate'] for field in reversed(fields_) if 'translate' in field._args__
                 ), False)
                 if not translate:
                     # patch the field definition by adding an override
@@ -3368,7 +3385,7 @@ class BaseModel(metaclass=MetaModel):
                 cls._fields[name] = fields_[0]
             else:
                 Field = type(fields_[-1])
-                self._add_field(name, Field(_base_fields=fields_))
+                self._add_field(name, Field(_base_fields=tuple(fields_)))
 
         # 2. add manual fields
         if self.pool._init_modules:
@@ -3700,7 +3717,8 @@ class BaseModel(metaclass=MetaModel):
                         for key, value in translation.items()
                         if key in old_terms_digested2value
                     }
-                stored_translations[lang] = field.translate(translation.get, old_value)
+                translation = field.translate(translation.get, old_value)
+                stored_translations[lang] = field.convert_to_cache(translation, self)
                 stored_translations.pop(f'_{lang}', None)
             self.env.cache.update_raw(self, field, [stored_translations], dirty=True)
 
@@ -4118,15 +4136,16 @@ class BaseModel(metaclass=MetaModel):
             root_company_msg = _lt("- Only a root company can be set on %(record)r. Currently set to %(company)r")
             for record, name, corecords in inconsistencies[:5]:
                 if record._name == 'res.company':
-                    msg, company = company_msg, record
+                    msg, companies = company_msg, record
                 elif record == corecords and name == 'company_id':
-                    msg, company = root_company_msg, record.company_id
+                    msg, companies = root_company_msg, record.company_id
                 else:
-                    msg, company = record_msg, record.company_id
+                    msg = record_msg
+                    companies = record.company_id if 'company_id' in record else record.company_ids
                 field = self.env['ir.model.fields']._get(self._name, name)
                 lines.append(str(msg) % {
                     'record': record.display_name,
-                    'company': company.display_name,
+                    'company': ", ".join(company.display_name for company in companies),
                     'field': field.field_description,
                     'fname': field.name,
                     'values': ", ".join(repr(rec.display_name) for rec in corecords),
@@ -6987,12 +7006,13 @@ class BaseModel(metaclass=MetaModel):
             for dep in self.pool.get_dependent_fields(field.base_field)
         )
 
-    def _apply_onchange_methods(self, field_name, result):
-        """ Apply onchange method(s) for field ``field_name`` on ``self``. Value
-            assignments are applied on ``self``, while warning messages are put
-            in dictionary ``result``.
+    def _apply_onchange_methods(self, field_name, result, excluded_methods=()):
+        """ Apply onchange method(s) (not in ``excluded_methods``) for field ``field_name`` on ``self``.
+            Value assignments are applied on ``self``, while warning messages are put in dictionary ``result``.
         """
         for method in self._onchange_methods.get(field_name, ()):
+            if method in excluded_methods:
+                continue
             res = method(self)
             if not res:
                 continue
@@ -7166,9 +7186,8 @@ class TransientModel(Model):
     """ Model super-class for transient records, meant to be temporarily
     persistent, and regularly vacuum-cleaned.
 
-    A TransientModel has a simplified access rights management, all users can
-    create new records, and may only access the records they created. The
-    superuser has unrestricted access to all TransientModel records.
+    A TransientModel uses the same access rights mechanisms as a regular
+    :class:`Model`, through access control lists and record rules.
     """
     _auto = True                # automatically create database backend
     _register = False           # not visible in ORM registry, meant to be python-inherited only

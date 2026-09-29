@@ -3,13 +3,16 @@
 
 from odoo import api, fields, models, _
 from odoo.exceptions import UserError
-from odoo.addons.account.models.company import PEPPOL_DEFAULT_COUNTRIES
+from odoo.addons.account.models.company import PEPPOL_MAILING_COUNTRIES
 
 
 class AccountMove(models.Model):
     _inherit = 'account.move'
 
-    peppol_message_uuid = fields.Char(string='PEPPOL message ID')
+    peppol_message_uuid = fields.Char(
+        string='PEPPOL message ID',
+        index='btree_not_null',
+    )
     peppol_move_state = fields.Selection(
         selection=[
             ('ready', 'Ready to send'),
@@ -25,6 +28,7 @@ class AccountMove(models.Model):
         copy=False,
     )
     peppol_is_demo_uuid = fields.Boolean(compute="_compute_peppol_is_demo_uuid")
+    peppol_is_sent = fields.Boolean(compute='_compute_peppol_is_sent')
 
     @api.model
     def fields_get(self, allfields=None, attributes=None):
@@ -56,7 +60,7 @@ class AccountMove(models.Model):
     def _compute_peppol_move_state(self):
         for move in self:
             if all([
-                move.company_id.account_peppol_proxy_state == 'active',
+                move.company_id.account_peppol_proxy_state in ('active', 'sender'),
                 move.commercial_partner_id.account_peppol_is_endpoint_valid,
                 move.state == 'posted',
                 move.move_type in ('out_invoice', 'out_refund', 'out_receipt'),
@@ -72,13 +76,32 @@ class AccountMove(models.Model):
             else:
                 move.peppol_move_state = move.peppol_move_state
 
-    def _notify_by_email_prepare_rendering_context(self, message, **kwargs):
-        render_context = super()._notify_by_email_prepare_rendering_context(message, **kwargs)
+    @api.depends('peppol_move_state')
+    def _compute_peppol_is_sent(self):
+        for move in self:
+            move.peppol_is_sent = move.peppol_move_state not in {False, 'ready', 'to_send', 'error', 'skipped'}
+
+    @api.depends('peppol_is_sent')
+    def _compute_show_reset_to_draft_button(self):
+        # EXTEND 'account' to hide the reset to draft button for sent Peppol invoices
+        super()._compute_show_reset_to_draft_button()
+        self.filtered(lambda move: move.peppol_is_sent and move.is_sale_document(include_receipts=True)).show_reset_to_draft_button = False
+
+    def _notify_by_email_prepare_rendering_context(self, message, msg_vals=False, model_description=False,
+                                                   force_email_company=False, force_email_lang=False):
+        render_context = super()._notify_by_email_prepare_rendering_context(
+            message, msg_vals=msg_vals, model_description=model_description,
+            force_email_company=force_email_company, force_email_lang=force_email_lang
+        )
         invoice = render_context['record']
         invoice_country = invoice.commercial_partner_id.country_code
-        if invoice_country in PEPPOL_DEFAULT_COUNTRIES:
+        company_country = invoice.company_id.country_code
+        company_on_peppol = invoice.company_id.account_peppol_proxy_state in ('active', 'sender')
+        if company_on_peppol and company_country in PEPPOL_MAILING_COUNTRIES and invoice_country in PEPPOL_MAILING_COUNTRIES:
             render_context['peppol_info'] = {
                 'peppol_country': invoice_country,
                 'is_peppol_sent': invoice.peppol_move_state in ('processing', 'done'),
+                'is_partner_b2c': len(invoice.commercial_partner_id.vat or '') <= 1,
+                'partner_on_peppol': invoice.commercial_partner_id.account_peppol_is_endpoint_valid,
             }
         return render_context

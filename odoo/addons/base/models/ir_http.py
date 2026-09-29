@@ -212,7 +212,7 @@ class IrHttp(models.AbstractModel):
                 if handle_error := rule.endpoint.routing.get('handle_params_access_error'):
                     if response := handle_error(e):
                         werkzeug.exceptions.abort(response)
-                if isinstance(e, odoo.exceptions.MissingError):
+                if request.env.user.is_public or isinstance(e, odoo.exceptions.MissingError):
                     raise werkzeug.exceptions.NotFound() from e
                 raise
 
@@ -273,9 +273,7 @@ class IrHttp(models.AbstractModel):
     def _gc_sessions(self):
         if os.getenv("ODOO_SKIP_GC_SESSIONS"):
             return
-        ICP = self.env["ir.config_parameter"]
-        max_lifetime = int(ICP.get_param('sessions.max_inactivity_seconds', http.SESSION_LIFETIME))
-        http.root.session_store.vacuum(max_lifetime=max_lifetime)
+        http.root.session_store.vacuum(max_lifetime=http.get_session_max_inactivity(self.env))
 
     @api.model
     def get_translations_for_webclient(self, modules, lang):

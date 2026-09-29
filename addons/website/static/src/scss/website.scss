@@ -17,12 +17,14 @@ $-seen-urls: ();
     }
 }
 
+$real-body-bg: $body-bg;
 :root {
     // The color behind the boxed layout is forced by Odoo. The box background
     // color uses the `$body-bg` variable.
     // grep: BOXED_BODY_BG_ODOO
     @if o-website-value('layout') != 'full' {
         $-boxed-layout-body-bg: o-color('body');
+        $real-body-bg: $-boxed-layout-body-bg !global;
         --#{$variable-prefix}body-bg-rgb: #{to-rgb($-boxed-layout-body-bg)};
         --#{$variable-prefix}body-bg: #{$-boxed-layout-body-bg};
     }
@@ -175,6 +177,15 @@ $-seen-urls: ();
         $custom-colors: append($custom-colors, $key);
     }
     @include print-variable('custom-colors', $custom-colors);
+}
+
+body {
+    // Remove the transparency of the background color to prevent the fallback
+    // iframe used for navigation in the backend to be visible once the top
+    // iframe is loaded (see /website/iframefallback). Indeed, if the website
+    // <body> uses a transparent background color, the fallback iframe would be
+    // visible on some // browsers (e.g. Chrome).
+    background-color: mix(change-color($real-body-bg, $alpha: 1), white, percentage(alpha($real-body-bg)));
 }
 
 @mixin body-image-bg-style() {
@@ -410,7 +421,7 @@ $-header-nav-link-height: $nav-link-height;
     @include o-add-gradient('footer-gradient');
 
     .o_footer_copyright {
-        $-footer-color: o-color('footer-custom') or o-color('footer');
+        $-footer-color: o-color('footer-custom') or o-color('footer') or rgba(0, 0, 0, 0);
         @include o-apply-colors('copyright', $background: $-footer-color);
         @include o-apply-colors('copyright-custom', $background: $-footer-color);
         @include o-add-gradient('copyright-gradient');
@@ -1131,15 +1142,20 @@ header {
     }
 
     nav.navbar {
-        @if o-website-value('menu-border-width') {
+        $-menu-border-width: o-website-value('menu-border-width');
+        @if $-menu-border-width {
+            // When the header should only have a bottom border, only take the
+            // first value of the variable 'menu-border-width' to behave as if
+            // the input only accepted one number.
+            $-menu-border-bottom-width: nth($-menu-border-width, 1); 
             border: o-website-value('menu-border-style') o-color('menu-border-color') !important;
-            border-width: 0 0 o-website-value('menu-border-width') 0 !important;
+            border-width: 0 0 $-menu-border-bottom-width 0 !important;
 
             &.o_border_right_only {
-                border-width: 0 o-website-value('menu-border-width') 0 0 !important;
+                border-width: 0 $-menu-border-bottom-width 0 0 !important;
             }
             &.o_full_border {
-                border-width: o-website-value('menu-border-width') !important;
+                border-width: $-menu-border-width !important;
             }
         }
         border-radius: o-website-value('menu-border-radius') !important;

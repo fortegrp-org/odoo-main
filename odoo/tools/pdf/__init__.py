@@ -27,9 +27,9 @@ except ImportError:
 # might be a good case for exception groups
 error = None
 # keep pypdf2 2.x first so noble uses that rather than pypdf 4.0
-for submod in ['._pypdf2_2', '._pypdf', '._pypdf2_1']:
+for SUBMOD in ['._pypdf2_2', '._pypdf', '._pypdf2_1']:
     try:
-        pypdf = importlib.import_module(submod, __spec__.name)
+        pypdf = importlib.import_module(SUBMOD, __spec__.name)
         break
     except ImportError as e:
         if error is None:
@@ -266,12 +266,13 @@ def add_banner(pdf_stream, text=None, logo=False, thickness=2 * cm):
     watermark_pdf = PdfFileReader(packet, overwriteWarnings=False)
     new_pdf = PdfFileWriter()
     for p in range(old_pdf.getNumPages()):
-        new_page = old_pdf.getPage(p)
+        new_pdf.addPage(old_pdf.getPage(p))
+        new_page = new_pdf.getPage(-1)
         # Remove annotations (if any), to prevent errors in PyPDF2
         if '/Annots' in new_page:
             del new_page['/Annots']
         new_page.mergePage(watermark_pdf.getPage(p))
-        new_pdf.addPage(new_page)
+        new_page.compressContentStreams()
 
     # Write the new pdf into a new output stream
     output = io.BytesIO()
@@ -291,14 +292,25 @@ class OdooPdfFileReader(PdfFileReader):
             # If the PDF is owner-encrypted, try to unwrap it by giving it an empty user password.
             self.decrypt('')
 
-        try:
-            file_path = self.trailer["/Root"].get("/Names", {}).get("/EmbeddedFiles", {}).get("/Names")
-
-            if not file_path:
-                return []
+        def _traverse_nodes(obj):
+            file_path = obj.get("/Names", [])
             for p in file_path[1::2]:
                 attachment = p.getObject()
-                yield (attachment["/F"], attachment["/EF"]["/F"].getObject().getData())
+                try:
+                    yield (attachment["/F"], attachment["/EF"]["/F"].getObject().getData())
+                except (KeyError, AttributeError):
+                    continue
+            for kid in obj.get("/Kids", []):
+                if id(kid) not in visited_nodes:
+                    visited_nodes.add(id(kid))
+                    yield from _traverse_nodes(kid.getObject())
+
+        try:
+            file_path = self.trailer["/Root"].get("/Names", {}).get("/EmbeddedFiles", {})
+            if not file_path:
+                return []
+            visited_nodes = set()
+            yield from _traverse_nodes(file_path)
         except Exception:  # noqa: BLE001
             # malformed pdf (i.e. invalid xref page)
             return []
@@ -315,29 +327,57 @@ class OdooPdfFileWriter(PdfFileWriter):
         self._reader = None
         self.is_pdfa = False
 
-    def add_attachment(self, name, data, subtype=None):
+    def format_subtype(self, subtype):
+        """
+        Apply the correct format to the subtype.
+        It should take the form of "/xxx#2Fxxx". E.g. for "text/xml": "/text#2Fxml"
+        :param subtype: The mime-type of the attachement.
+        """
+        if not subtype:
+            return subtype
+
+        adapted_subtype = subtype
+        if REGEX_SUBTYPE_UNFORMATED.match(subtype):
+            # _pypdf2_2 and _pypdf does the formating when creating a NameObject
+            if SUBMOD in ('._pypdf2_2', '._pypdf'):
+                return '/' + subtype
+            adapted_subtype = '/' + subtype.replace('/', '#2F')
+
+        if not REGEX_SUBTYPE_FORMATED.match(adapted_subtype):
+            # The subtype still does not match the correct format, so we will not add it to the document
+            _logger.warning("Attempt to add an attachment with the incorrect subtype '%s'. The subtype will be ignored.", subtype)
+            adapted_subtype = ''
+        return adapted_subtype
+
+    def add_attachment(self, name, data, subtype=None, afrelationship='/Data'):
         """
         Add an attachment to the pdf. Supports adding multiple attachment, while respecting PDF/A rules.
         :param name: The name of the attachement
         :param data: The data of the attachement
         :param subtype: The mime-type of the attachement. This is required by PDF/A, but not essential otherwise.
-        It should take the form of "/xxx#2Fxxx". E.g. for "text/xml": "/text#2Fxml"
+        :param afrelationship: The relationship between the embedded file and the PDF content. This is required by PDF/A.
         """
-        adapted_subtype = subtype
-        if subtype:
-            # If we receive the subtype in an 'unformated' (mimetype) format, we'll try to convert it to a pdf-valid one
-            if REGEX_SUBTYPE_UNFORMATED.match(subtype):
-                adapted_subtype = '/' + subtype.replace('/', '#2F')
+        # NOTE: Currently AFRelationship can only be '/Alternative' as it is coupled to the hardcoded
+        # <fx:ConformanceLevel>EXTENDED</fx:ConformanceLevel> in the XMP metadata template
+        # (account_invoice_pdfa_3_facturx_metadata). If support for MINIMUM/BASIC-WL is ever added,
+        # both afrelationship and ConformanceLevel must change together.
 
-            if not REGEX_SUBTYPE_FORMATED.match(adapted_subtype):
-                # The subtype still does not match the correct format, so we will not add it to the document
-                _logger.warning("Attempt to add an attachment with the incorrect subtype '%s'. The subtype will be ignored.", subtype)
-                adapted_subtype = ''
+        # Valid AFRelationship values per PDF 2.0 spec (ISO 32000-2, section 7.11.3)
+        valid_afrelationships = {'/Source', '/Data', '/Alternative', '/Supplement', '/Unspecified', '/EncryptedPayload', '/FormData', '/Schema'}
+        if afrelationship not in valid_afrelationships:
+            _logger.warning(
+                "Invalid AFRelationship value '%s', falling back to '/Data'. "
+                "Valid values are: %s",
+                afrelationship, ', '.join(sorted(valid_afrelationships))
+            )
+            afrelationship = '/Data'
+        adapted_subtype = self.format_subtype(subtype)
 
         attachment = self._create_attachment_object({
             'filename': name,
             'content': data,
             'subtype': adapted_subtype,
+            'afrelationship': afrelationship,
         })
         if self._root_object.get('/Names') and self._root_object['/Names'].get('/EmbeddedFiles'):
             names_array = self._root_object["/Names"]["/EmbeddedFiles"]["/Names"]
@@ -370,9 +410,9 @@ class OdooPdfFileWriter(PdfFileWriter):
             })
     addAttachment = add_attachment
 
-    def embed_odoo_attachment(self, attachment, subtype=None):
+    def embed_odoo_attachment(self, attachment, subtype=None, afrelationship='/Data'):
         assert attachment, "embed_odoo_attachment cannot be called without attachment."
-        self.addAttachment(attachment.name, attachment.raw, subtype=subtype or attachment.mimetype)
+        self.addAttachment(attachment.name, attachment.raw, subtype=subtype or attachment.mimetype, afrelationship=afrelationship)
 
     def cloneReaderDocumentRoot(self, reader):
         super().cloneReaderDocumentRoot(reader)
@@ -396,7 +436,7 @@ class OdooPdfFileWriter(PdfFileWriter):
                 # only need this if running on 1.x
                 #
                 # incidentally that means the heuristic above is completely broken
-                if submod == '._pypdf2_1':
+                if SUBMOD == '._pypdf2_1':
                     self._header += second_line
         # clone_reader_document_root clones reader._ID since 3.2 (py-pdf/pypdf#1520)
         if not hasattr(self, '_ID'):
@@ -419,14 +459,18 @@ class OdooPdfFileWriter(PdfFileWriter):
         """
         # Set the PDF version to 1.7 (as PDF/A-3 is based on version 1.7) and make it PDF/A compliant.
         # See https://github.com/veraPDF/veraPDF-validation-profiles/wiki/PDFA-Parts-2-and-3-rules#rule-612-1
+        self._header = b"%PDF-1.7"
 
         # " The file header shall begin at byte zero and shall consist of "%PDF-1.n" followed by a single EOL marker,
         # where 'n' is a single digit number between 0 (30h) and 7 (37h) "
         # " The aforementioned EOL marker shall be immediately followed by a % (25h) character followed by at least four
-        # bytes, each of whose encoded byte values shall have a decimal value greater than 127 "
-        self._header = b"%PDF-1.7\n"
-        if submod == '._pypdf2_1':
-            self._header += b"%\xDE\xAD\xBE\xEF"
+        # bytes, each of whose encoded byte values shall have a decimal value greater than 127 ".
+        # PyPDF2 2.X+ already adds these 4 characters by default (so ._pypdf2_2 and ._pypdf don't need it).
+        # The injected character `\xc3\xa9` is equivalent to the character `é`.
+        # Therefore, on `_pypdf2_1`, the header will look like: `%PDF-1.7\n%éééé`,
+        # while on `_pypdf2_2` and `_pypdf`, it will look like: `%PDF-1.7\n%âãÏÓ`.
+        if SUBMOD == '._pypdf2_1':
+            self._header += b"\n%\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9"
 
         # Add a document ID to the trailer. This is only needed when using encryption with regular PDF, but is required
         # when using PDF/A
@@ -495,8 +539,52 @@ class OdooPdfFileWriter(PdfFileWriter):
         else:
             _logger.warning('The fonttools package is not installed. Generated PDF may not be PDF/A compliant.')
 
+        # Every annotation dictionary, except those whose subtype is Popup,
+        # must contain the /F key (annotation flags), as required by PDF/A (clause 6.3.2).
+        # - Print flag must be 1.
+        # - Hidden, Invisible, ToggleNoView and NoView flags must be 0.
+        # - For text annotations, NoZoom and NoRotate are recommended to be 1.
+        PDFA_ANNOT_FLAG_INVISIBLE = 1 << 0
+        PDFA_ANNOT_FLAG_HIDDEN = 1 << 1
+        PDFA_ANNOT_FLAG_PRINT = 1 << 2
+        PDFA_ANNOT_FLAG_NOZOOM = 1 << 3
+        PDFA_ANNOT_FLAG_NOROTATE = 1 << 4
+        PDFA_ANNOT_FLAG_NOVIEW = 1 << 5
+        PDFA_ANNOT_FLAG_TOGGLENOVIEW = 1 << 8
+
+        for page in pages:
+            page_obj = page.getObject()
+            annots = page_obj.get('/Annots', [])
+            if isinstance(annots, IndirectObject):
+                annots = annots.getObject()
+            for annot_ref in annots:
+                annot = annot_ref.getObject()
+                if annot.get('/Subtype') == '/Popup':
+                    continue
+
+                flags = annot.get('/F', 0)
+                flags |= PDFA_ANNOT_FLAG_PRINT
+                flags &= ~(
+                    PDFA_ANNOT_FLAG_HIDDEN
+                    | PDFA_ANNOT_FLAG_INVISIBLE
+                    | PDFA_ANNOT_FLAG_TOGGLENOVIEW
+                    | PDFA_ANNOT_FLAG_NOVIEW
+                )
+                if annot.get('/Subtype') == '/Text':
+                    flags |= PDFA_ANNOT_FLAG_NOZOOM | PDFA_ANNOT_FLAG_NOROTATE
+
+                annot[NameObject('/F')] = NumberObject(flags)
+
         outlines = self._root_object['/Outlines'].getObject()
         outlines[NameObject('/Count')] = NumberObject(1)
+
+        # [6.7.2.2-1] include a MarkInfo dictionary containing "Marked" with true value
+        mark_info = DictionaryObject({NameObject("/Marked"): BooleanObject(True)})
+        self._root_object[NameObject("/MarkInfo")] = mark_info
+
+        # [6.7.3.3-1] include minimal document structure in the catalog
+        struct_tree_root = DictionaryObject({NameObject("/Type"): NameObject("/StructTreeRoot")})
+        self._root_object[NameObject("/StructTreeRoot")] = struct_tree_root
 
         # Set odoo as producer
         self.addMetadata({
@@ -545,7 +633,7 @@ class OdooPdfFileWriter(PdfFileWriter):
                 DictionaryObject({
                     NameObject('/CheckSum'): createStringObject(md5(attachment['content']).hexdigest()),
                     NameObject('/ModDate'): createStringObject(datetime.now().strftime(DEFAULT_PDF_DATETIME_FORMAT)),
-                    NameObject('/Size'): NameObject(f"/{len(attachment['content'])}"),
+                    NameObject('/Size'): NumberObject(len(attachment['content'])),
                 }),
         })
         if attachment.get('subtype'):
@@ -555,7 +643,7 @@ class OdooPdfFileWriter(PdfFileWriter):
         file_entry_object = self._addObject(file_entry)
         filename_object = createStringObject(attachment['filename'])
         filespec_object = DictionaryObject({
-            NameObject("/AFRelationship"): NameObject("/Data"),
+            NameObject("/AFRelationship"): NameObject(attachment.get('afrelationship', '/Data')),
             NameObject("/Type"): NameObject("/Filespec"),
             NameObject("/F"): filename_object,
             NameObject("/EF"):

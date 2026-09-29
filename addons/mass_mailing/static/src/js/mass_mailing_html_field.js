@@ -254,7 +254,7 @@ export class MassMailingHtmlField extends HtmlField {
             this.wysiwyg.odooEditor.observerActive();
 
             if ($codeview.hasClass('d-none')) {
-                this.wysiwyg.setValue(this._getCodeViewValue($codeview[0]));
+                this.wysiwyg.setValue(this._getCodeViewValue($codeview[0]), false);
                 this.wysiwyg.odooEditor.sanitize();
                 this.wysiwyg.odooEditor.historyStep(true);
             } else {
@@ -643,6 +643,30 @@ export class MassMailingHtmlField extends HtmlField {
             this.props.record.data[this.props.name] = this.props.record.data.body_html;
         }
         await super._setupReadonlyIframe();
+
+        const iframeTarget = this.sandboxedPreview
+            ? this.iframeRef.el.contentDocument.documentElement
+            : this.iframeRef.el.contentDocument.querySelector("#iframe_target");
+        this._fixInlineDynamicPlaceholders(iframeTarget);
+    }
+    _fixInlineDynamicPlaceholders(iframe) {
+        // Add data-oe-t-inline attribute to t elements whose contents are inline
+        const checkAllInline = (el) =>
+            [...el.children].every((child) => {
+                if (child.tagName === "T") {
+                    return checkAllInline(child);
+                } else {
+                    return (
+                        child.nodeType !== Node.ELEMENT_NODE ||
+                        iframe.contentWindow.getComputedStyle(child).display === "inline"
+                    );
+                }
+            });
+        for (const tElement of iframe.querySelectorAll("t")) {
+            if (checkAllInline(tElement)) {
+                tElement.setAttribute("data-oe-t-inline", "true");
+            }
+        }
     }
     async _lazyloadWysiwyg() {
         await super._lazyloadWysiwyg(...arguments);

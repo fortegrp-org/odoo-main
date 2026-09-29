@@ -15,6 +15,7 @@ __all__ = [
 
 
 pypdf.PageObject.mergePage = lambda self, page2: self.merge_page(page2)
+pypdf.PageObject.compressContentStreams = lambda self: self.compress_content_streams()
 pypdf.PageObject.mediaBox = property(lambda self: self.mediabox)
 # use lambdas (rather than copying) to allow overrides of the base method
 generic.PdfObject.getObject = lambda self: self.get_object()
@@ -61,8 +62,8 @@ class PdfWriter(_Writer):
     def appendPagesFromReader(self, reader):
         return self.append_pages_from_reader(reader)
 
-    def addBlankPage(self):
-        return self.add_blank_page()
+    def addBlankPage(self, width=None, height=None):
+        return self.add_blank_page(width=width, height=height)
 
     def addAttachment(self, fname, data):
         return self.add_attachment(fname, data)

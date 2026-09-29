@@ -922,7 +922,7 @@ class StockQuant(models.Model):
 
         # do full packaging reservation when it's needed
         if product_packaging_id and product_id.product_tmpl_id.categ_id.packaging_reserve_method == "full":
-            available_quantity = product_packaging_id._check_qty(available_quantity, product_id.uom_id, "DOWN")
+            available_quantity = product_packaging_id._check_qty(min(quantity, available_quantity), product_id.uom_id, "DOWN")
 
         quantity = min(quantity, available_quantity)
 
@@ -999,8 +999,7 @@ class StockQuant(models.Model):
             quant = self._gather(
                 self.product_id, self.location_id, lot_id=self.lot_id,
                 package_id=self.package_id, owner_id=self.owner_id, strict=True)
-            if quant:
-                self.quantity = sum(quant.filtered(lambda q: q.lot_id == self.lot_id).mapped('quantity'))
+            self.quantity = sum(quant.filtered(lambda q: q.lot_id == self.lot_id).mapped('quantity'))
 
             # Special case: directly set the quantity to one for serial numbers,
             # it'll trigger `inventory_quantity` compute.
@@ -1092,8 +1091,12 @@ class StockQuant(models.Model):
             raise ValidationError(_('Quantity or Reserved Quantity should be set.'))
         self = self.sudo()
         quants = self._gather(product_id, location_id, lot_id=lot_id, package_id=package_id, owner_id=owner_id, strict=True)
-        if lot_id and quantity > 0:
-            quants = quants.filtered(lambda q: q.lot_id)
+        if lot_id:
+            if float_compare(quantity, 0, precision_rounding=product_id.uom_id.rounding) > 0:
+                quants = quants.filtered(lambda q: q.lot_id)
+            else:
+                # Don't remove quantity from a negative quant without lot
+                quants = quants.filtered(lambda q: float_compare(q.quantity, 0, precision_rounding=q.product_uom_id.rounding) > 0 or q.lot_id)
 
         if location_id.should_bypass_reservation():
             incoming_dates = []
@@ -1320,6 +1323,9 @@ class StockQuant(models.Model):
         if not self.env['ir.config_parameter'].sudo().get_param('stock.skip_quant_tasks'):
             self._quant_tasks()
         ctx = dict(self.env.context or {})
+        if not domain:
+            domain = []
+        domain += [('product_id.company_id', 'in', ctx.get('allowed_company_ids', []) + [False])]
         ctx['inventory_report_mode'] = True
         ctx.pop('group_by', None)
         action = {
@@ -1328,7 +1334,7 @@ class StockQuant(models.Model):
             'res_model': 'stock.quant',
             'type': 'ir.actions.act_window',
             'context': ctx,
-            'domain': domain or [],
+            'domain': domain,
             'help': """
                 <p class="o_view_nocontent_empty_folder">{}</p>
                 <p>{}</p>

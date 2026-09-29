@@ -2,6 +2,7 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
 from dateutil.relativedelta import relativedelta
+from freezegun import freeze_time
 
 from odoo import Command, fields
 from odoo.exceptions import UserError
@@ -786,6 +787,29 @@ class StockMove(TransactionCase):
         self.assertEqual(len(move1.move_line_ids), 0)
         self.assertEqual(self.env['stock.quant']._get_available_quantity(self.product_serial, self.stock_location, strict=True), 1.0)
         self.assertEqual(self.env['stock.quant']._get_available_quantity(self.product_serial, self.stock_location, lot_id=lot1, strict=False), 2.0)
+
+    def test_mixed_tracking_reservation_9(self):
+        lot1 = self.env["stock.lot"].create({"name": "lot1", "product_id": self.product_serial.id})
+        lot2 = self.env["stock.lot"].create({"name": "lot2", "product_id": self.product_serial.id})
+        self.env["stock.quant"]._update_available_quantity(self.product_serial, self.stock_location, 10, lot_id=lot1)
+        self.env["stock.quant"]._update_available_quantity(self.product_serial, self.stock_location, 1)
+        self.env["stock.quant"]._update_available_quantity(self.product_serial, self.stock_location, -1)
+        move_out = self.env['stock.move'].create({
+            'name': 'test_mixed_tracking_reservation_9',
+            'location_id': self.stock_location.id,
+            'location_dest_id': self.customer_location.id,
+            'product_id': self.product_serial.id,
+            'product_uom': self.uom_unit.id,
+            'product_uom_qty': 1.0,
+        })
+        move_out._action_confirm()
+        move_out._action_assign()
+        move_out.move_line_ids.lot_id = lot2
+        move_out.picked = True
+        move_out._action_done()
+        quants = self.gather_relevant(self.product_serial, self.stock_location)
+        self.assertEqual(quants.filtered(lambda q: q.lot_id == lot1).quantity, 10)
+        self.assertEqual(quants.filtered(lambda q: q.lot_id == lot2).quantity, -1)
 
     def test_putaway_1(self):
         """ Receive products from a supplier. Check that putaway rules are rightly applied on
@@ -4780,6 +4804,46 @@ class StockMove(TransactionCase):
         internal_transfer.button_validate()
         self.assertEqual(internal_transfer.state, 'done')
 
+    def test_validate_picking_wihtout_picked_reservations(self):
+        """
+        Check that validating a picking where every picked move is unreserved
+        raises a user error for validating an an empty transfer
+        """
+        picking = self.env['stock.picking'].create({
+            'picking_type_id': self.ref('stock.picking_type_out'),
+            'location_id': self.stock_location.id,
+            'location_dest_id': self.customer_location.id,
+            'move_type': 'one',
+            'move_ids_without_package': [
+                Command.create({
+                    'name': 'test_out_with_reservation',
+                    'product_id': self.product_consu.id,
+                    'product_uom': self.product_consu.uom_id.id,
+                    'product_uom_qty': 1.0,
+                    'location_id': self.stock_location.id,
+                    'location_dest_id': self.customer_location.id,
+                }),
+                Command.create({
+                    'name': 'test_out_without_reservation',
+                    'product_id': self.product.id,
+                    'product_uom': self.product.uom_id.id,
+                    'product_uom_qty': 1.0,
+                    'location_id': self.stock_location.id,
+                    'location_dest_id': self.customer_location.id,
+                }),
+            ]
+        })
+        picking.action_confirm()
+        # pick only the unreserved move
+        picking.move_ids[1].picked = True
+        self.assertRecordValues(picking.move_ids, [
+            {'quantity': 1.0, 'picked': False, 'state': 'assigned'},
+            {'quantity': 0.0, 'picked': True, 'state': 'confirmed'},
+        ])
+        # there is nothing to validate
+        with self.assertRaises(UserError):
+            picking.button_validate()
+
     def test_set_quantity_1(self):
         move1 = self.env['stock.move'].create({
             'name': 'test_set_quantity_1',
@@ -6801,16 +6865,17 @@ class StockMove(TransactionCase):
         """
         self.env['stock.quant']._update_available_quantity(self.product, self.stock_location, 5)
         # Create two moves using the all available quantity and reserve them
-        move_1, move_2 = self.env['stock.move'].create([{
-            'name': 'New move',
-            'product_id': self.product.id,
-            'product_uom_qty': qty,
-            'product_uom': self.product.uom_id.id,
-            'location_id': self.stock_location.id,
-            'location_dest_id': self.customer_location.id,
-        } for qty in [2, 3]])
-        (move_1 | move_2)._action_confirm()
-        (move_1 | move_2)._action_assign()
+        with freeze_time(fields.Datetime.now()):
+            move_1, move_2 = self.env['stock.move'].create([{
+                'name': 'New move',
+                'product_id': self.product.id,
+                'product_uom_qty': qty,
+                'product_uom': self.product.uom_id.id,
+                'location_id': self.stock_location.id,
+                'location_dest_id': self.customer_location.id,
+            } for qty in [2, 3]])
+            (move_1 | move_2)._action_confirm()
+            (move_1 | move_2)._action_assign()
 
         self.assertEqual(move_1.date, move_2.date)
         self.assertEqual(move_1.state, 'assigned')

@@ -236,8 +236,8 @@ class AccountChartTemplate(models.AbstractModel):
         if not isinstance(companies, models.BaseModel):
             companies = self.env['res.company'].browse(companies)
         for company in companies:
-            self.sudo()._load_data(self._get_demo_data(company))
-            self._post_load_demo_data(company)
+            self.with_context(install_mode=True).sudo()._load_data(self._get_demo_data(company))
+            self.with_context(install_mode=True)._post_load_demo_data(company)
 
     def _pre_reload_data(self, company, template_data, data):
         """Pre-process the data in case of reloading the chart of accounts.
@@ -283,7 +283,9 @@ class AccountChartTemplate(models.AbstractModel):
                         'noupdate': True,
                     }])
 
-        account_group_count = self.env['account.group'].search_count([])
+        account_group_count = self.env['account.group'].search_count(
+            [] if company.parent_id else [('company_id', '=', company.id)],
+        )
         if account_group_count:
             data.pop('account.group', None)
 
@@ -503,6 +505,7 @@ class AccountChartTemplate(models.AbstractModel):
             This allows to define all the data before the records even exist in the database.
             """
             fields = ((model._fields[k], k, v) for k, v in values.items() if k in model._fields)
+            failed_fields = []
             for field, fname, value in fields:
                 if not value:
                     values[fname] = False
@@ -513,16 +516,13 @@ class AccountChartTemplate(models.AbstractModel):
                     try:
                         values[fname] = self.ref(value).id if value not in ('', 'False', 'None') else False
                     except ValueError:
-                        if model != self.env['res.company']:
+                        if model._name == 'res.company':
+                            # Try a fallback on the company when reloading/loading on a branch
+                            values[fname] = self.env.company[fname] or self.env.company.root_id[fname] or False
+                        else:
                             _logger.warning("Failed when trying to recover %s for field=%s", value, field)
-                            raise
-
-                        # We can't find the record referenced in the chart template in our database.
-                        # This might happen when we're creating a branch and the parent company has deleted the
-                        # referenced record and replaced it with something else.
-                        #
-                        # In this case, we try looking for the record already set on the company or its root.
-                        values[fname] = self.env.company[fname] or self.env.company.parent_ids[0][fname] or False
+                            failed_fields.append(fname)
+                            values[fname] = False
                 elif field.type in ('one2many', 'many2many') and isinstance(value[0], (list, tuple)):
                     for i, (command, _id, *last_part) in enumerate(value):
                         if last_part:
@@ -543,6 +543,8 @@ class AccountChartTemplate(models.AbstractModel):
                         for v in value.split(',')
                         if v
                     ])]
+            for fname in failed_fields:
+                del values[fname]
             return values
 
         def delay(all_data):
@@ -928,7 +930,7 @@ class AccountChartTemplate(models.AbstractModel):
         # Assign the account based on the map
         for field, account_name in field_and_names:
             for tax_group in tax_group_data.values():
-                tax_group[field] = existing_accounts.get(account_template_xml_id)
+                tax_group[field] = existing_accounts.get(tax_group.get(field))
 
         for tax_template in tax_data.values():
             # This is required because the country isn't provided directly by the template
@@ -1310,9 +1312,11 @@ class AccountChartTemplate(models.AbstractModel):
 
         translation_importer = TranslationImporter(self.env.cr, verbose=False)
 
-        # Gather translations for records that are created from the chart_template data
-        for chart_template, chart_companies in groupby(companies, lambda c: c.chart_template):
-            chart_template_data = template_data or self.env['account.chart.template']._get_chart_template_data(chart_template)
+        for company in companies:
+            chart_template_data = template_data or self.env['account.chart.template'] \
+                .with_company(company) \
+                .sudo() \
+                ._get_chart_template_data(company.chart_template)
             chart_template_data.pop('template_data', None)
             for mname, data in chart_template_data.items():
                 for _xml_id, record in data.items():
@@ -1324,9 +1328,8 @@ class AccountChartTemplate(models.AbstractModel):
                                 continue
                             field_translation = self._get_field_translation(record, fname, lang)
                             if field_translation:
-                                for company in chart_companies:
-                                    xml_id = _xml_id if '.' in _xml_id else f"account.{company.id}_{_xml_id}"
-                                    translation_importer.model_translations[mname][fname][xml_id][lang] = field_translation
+                                xml_id = _xml_id if '.' in _xml_id else f"account.{company.id}_{_xml_id}"
+                                translation_importer.model_translations[mname][fname][xml_id][lang] = field_translation
 
         # Gather translations for the TEMPLATE_MODELS records that are not created from the chart_template data
         translation_langs = [lang for lang in langs if lang != 'en_US']  # there are no code translations for 'en_US' (original language)

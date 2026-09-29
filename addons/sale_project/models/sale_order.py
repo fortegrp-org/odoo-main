@@ -18,7 +18,7 @@ class SaleOrder(models.Model):
     visible_project = fields.Boolean('Display project', compute='_compute_visible_project', readonly=True)
     project_id = fields.Many2one('project.project', 'Project',
         help='Select a non billable project on which tasks can be created.')
-    project_ids = fields.Many2many('project.project', compute="_compute_project_ids", string='Projects', copy=False, groups="project.group_project_user", help="Projects used in this sales order.")
+    project_ids = fields.Many2many('project.project', compute="_compute_project_ids", string='Projects', copy=False, groups="project.group_project_user,project.group_project_milestone", help="Projects used in this sales order.")
     project_count = fields.Integer(string='Number of Projects', compute='_compute_project_ids', groups='project.group_project_user')
     milestone_count = fields.Integer(compute='_compute_milestone_count')
     is_product_milestone = fields.Boolean(compute='_compute_is_product_milestone')
@@ -115,7 +115,7 @@ class SaleOrder(models.Model):
             if not is_project_manager:
                 projects = projects._filter_access_rules('read')
             order.project_ids = projects
-            order.project_count = len(projects)
+            order.project_count = len(projects.filtered('active'))
 
     @api.onchange('project_id')
     def _onchange_project_id(self):
@@ -204,7 +204,7 @@ class SaleOrder(models.Model):
         action = {
             'type': 'ir.actions.act_window',
             'name': _('Projects'),
-            'domain': ['|', ('sale_order_id', '=', self.id), ('id', 'in', self.with_context(active_test=False).project_ids.ids), ('active', 'in', [True, False])],
+            'domain': ['|', ('sale_order_id', '=', self.id), ('id', 'in', self.project_ids.ids)],
             'res_model': 'project.project',
             'views': [(False, 'kanban'), (False, 'tree'), (False, 'form')],
             'view_mode': 'kanban,tree,form',
@@ -215,7 +215,7 @@ class SaleOrder(models.Model):
                 'default_allow_billable': 1,
             }
         }
-        if len(self.with_context(active_test=False).project_ids) == 1:
+        if len(self.project_ids) == 1:
             action.update({'views': [(False, 'form')], 'res_id': self.project_ids.id})
         return action
 

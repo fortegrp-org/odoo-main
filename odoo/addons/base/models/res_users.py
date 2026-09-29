@@ -32,6 +32,7 @@ from odoo.osv import expression
 from odoo.service.db import check_super
 from odoo.tools import is_html_empty, partition, collections, frozendict, lazy_property
 from odoo.tools.misc import OrderedSet
+from odoo.tools.sql import SQL
 
 _logger = logging.getLogger(__name__)
 
@@ -206,6 +207,10 @@ class Groups(models.Model):
     def _check_one_user_type(self):
         self.users._check_one_user_type()
 
+    @api.constrains('view_access')
+    def _check_inherited_view_groups(self):
+        self.view_access._check_groups()
+
     @api.ondelete(at_uninstall=False)
     def _unlink_except_settings_group(self):
         classified = self.env['res.config.settings']._get_classified_fields()
@@ -232,7 +237,7 @@ class Groups(models.Model):
         where = []
         for group in operand:
             values = [v for v in group.split('/') if v]
-            group_name = values.pop().strip()
+            group_name = values.pop().strip() if values else ''
             category_name = values and '/'.join(values).strip() or group_name
             group_domain = [('name', operator, lst and [group_name] or group_name)]
             category_ids = self.env['ir.module.category'].sudo()._search(
@@ -542,14 +547,17 @@ class Users(models.Model):
     def onchange_parent_id(self):
         return self.partner_id.onchange_parent_id()
 
-    def _fetch_query(self, query, fields):
-        records = super()._fetch_query(query, fields)
-        if not set(USER_PRIVATE_FIELDS).isdisjoint(field.name for field in fields):
-            if self.check_access_rights('write', raise_exception=False):
-                return records
-            for fname in USER_PRIVATE_FIELDS:
-                self.env.cache.update(records, self._fields[fname], repeat('********'))
-        return records
+    @property
+    def USER_PRIVATE_FIELDS(self):
+        return list(USER_PRIVATE_FIELDS)
+
+    def _field_to_sql(self, alias, fname, query=None):
+        if (
+            fname.split('.', 1)[0] in self.USER_PRIVATE_FIELDS
+            and not self.check_access_rights('write', raise_exception=False)
+        ):
+            return SQL("'********'")
+        return super()._field_to_sql(alias, fname, query)
 
     @api.constrains('company_id', 'company_ids', 'active')
     def _check_company(self):
@@ -655,16 +663,8 @@ class Users(models.Model):
     @api.model
     def _read_group_check_field_access_rights(self, field_names):
         super()._read_group_check_field_access_rights(field_names)
-        if set(field_names).intersection(USER_PRIVATE_FIELDS):
+        if set(field_names).intersection(self.USER_PRIVATE_FIELDS):
             raise AccessError(_("Invalid 'group by' parameter"))
-
-    @api.model
-    def _search(self, domain, offset=0, limit=None, order=None, access_rights_uid=None):
-        if not self.env.su and domain:
-            domain_fields = {term[0] for term in domain if isinstance(term, (tuple, list))}
-            if domain_fields.intersection(USER_PRIVATE_FIELDS):
-                raise AccessError(_('Invalid search criterion'))
-        return super()._search(domain, offset, limit, order, access_rights_uid)
 
     @api.model_create_multi
     def create(self, vals_list):
@@ -763,6 +763,7 @@ class Users(models.Model):
     def _unlink_except_master_data(self):
         portal_user_template = self.env.ref('base.template_portal_user_id', False)
         default_user_template = self.env.ref('base.default_user', False)
+        public_user = self.env.ref('base.public_user', False)
         if SUPERUSER_ID in self.ids:
             raise UserError(_('You can not remove the admin user as it is used internally for resources created by Odoo (updates, module installation, ...)'))
         user_admin = self.env.ref('base.user_admin', raise_if_not_found=False)
@@ -771,6 +772,8 @@ class Users(models.Model):
         self.env.registry.clear_cache()
         if (portal_user_template and portal_user_template in self) or (default_user_template and default_user_template in self):
             raise UserError(_('Deleting the template users is not allowed. Deleting this profile will compromise critical functionalities.'))
+        if public_user and public_user in self:
+            raise UserError(_("Deleting the public user is not allowed. Deleting this profile will compromise critical functionalities."))
 
     @api.model
     def _name_search(self, name, domain=None, operator='ilike', limit=None, order=None):
@@ -850,7 +853,7 @@ class Users(models.Model):
     def _get_invalidation_fields(self):
         return {
             'groups_id', 'active', 'lang', 'tz', 'company_id', 'company_ids',
-            *USER_PRIVATE_FIELDS,
+            *self.USER_PRIVATE_FIELDS,
             *self._get_session_token_fields()
         }
 
@@ -1453,12 +1456,15 @@ class UsersImplied(models.Model):
         if not values.get('groups_id'):
             return super(UsersImplied, self).write(values)
         users_before = self.filtered(lambda u: u._is_internal())
-        res = super(UsersImplied, self).write(values)
+        res = super(UsersImplied, self.with_context(no_add_implied_groups=True)).write(values)
         demoted_users = users_before.filtered(lambda u: not u._is_internal())
         if demoted_users:
             # demoted users are restricted to the assigned groups only
             vals = {'groups_id': [Command.clear()] + values['groups_id']}
             super(UsersImplied, demoted_users).write(vals)
+        if self.env.context.get('no_add_implied_groups'):
+            # in a recursive write, defer adding implied groups to the base call
+            return res
         # add implied groups for all users (in batches)
         users_batch = defaultdict(self.browse)
         for user in self:
@@ -1615,7 +1621,7 @@ class GroupsView(models.Model):
                     xml4.append(E.group(*right_group))
 
             xml4.append({'class': "o_label_nowrap"})
-            user_type_invisible = f'{user_type_field_name} != {group_employee.id}' if user_type_field_name else None
+            user_type_invisible = f'{user_type_field_name} != {group_employee.id}' if user_type_field_name else ''
 
             for xml_cat in sorted(xml_by_category.keys(), key=lambda it: it[0]):
                 master_category_name = xml_cat[1]

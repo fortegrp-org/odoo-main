@@ -45,6 +45,7 @@ class Manager(Thread):
             iot_box = {
                 'name': helpers.get_hostname(),
                 'identifier': helpers.get_mac_address(),
+                'serial_number': helpers.get_serial_number(),
                 'ip': domain,
                 'token': helpers.get_token(),
                 'version': helpers.get_version(detailed_version=True),
@@ -123,7 +124,9 @@ class Manager(Thread):
                 _logger.exception("Interface %s could not be started", str(interface))
 
         # Set scheduled actions
-        schedule and schedule.every().day.at("00:00").do(helpers.get_certificate_status)
+        if schedule:
+            schedule.every().day.at("00:00").do(helpers.get_certificate_status)
+            schedule.every().day.at("00:00").do(helpers.check_git_branch)
 
         #Setup the websocket connection
         if server_url:
@@ -131,7 +134,7 @@ class Manager(Thread):
         # Check every 3 secondes if the list of connected devices has changed and send the updated
         # list to the connected DB.
         self.previous_iot_devices = []
-        while 1:
+        while True:
             try:
                 if iot_devices != self.previous_iot_devices:
                     self.previous_iot_devices = iot_devices.copy()

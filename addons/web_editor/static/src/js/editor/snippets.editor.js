@@ -93,6 +93,7 @@ var SnippetEditor = Widget.extend({
         }
         this.displayOverlayOptions = false;
         this._$toolbarContainer = $();
+        this.isRtl = this.options.direction === "rtl";
 
         this.__isStarted = new Promise(resolve => {
             this.__isStartedResolveFunc = resolve;
@@ -300,7 +301,14 @@ var SnippetEditor = Widget.extend({
 
         const transform = window.getComputedStyle(targetEl).getPropertyValue('transform');
         const transformOrigin = window.getComputedStyle(targetEl).getPropertyValue('transform-origin');
-        targetEl.classList.add('o_transform_removal');
+        // Toggling 'o_transform_removal' below forces the target's own
+        // 'transform' to momentarily change (and back), which starts and
+        // then immediately interrupts any CSS transition defined on that
+        // property (e.g. on an affixed header). Suppress transitions on the
+        // target for the duration of this synchronous toggle (using the same
+        // "force no transition" class used elsewhere for this purpose) so it
+        // doesn't spuriously fire transition events on every cover() call.
+        targetEl.classList.add('o_we_force_no_transition', 'o_transform_removal');
 
         // Now cover the element
         const offset = $target.offset();
@@ -320,7 +328,14 @@ var SnippetEditor = Widget.extend({
         });
         this.$('.o_handles').css('height', $target.outerHeight());
 
+        // Remove 'o_transform_removal' (restoring the target's real
+        // 'transform') before re-enabling transitions, each followed by a
+        // forced style flush. Removing both at once would let the browser
+        // consider the 'transform' change eligible for the transition that
+        // is simultaneously being re-enabled, spuriously starting one.
         targetEl.classList.remove('o_transform_removal');
+        void targetEl.offsetWidth;
+        targetEl.classList.remove('o_we_force_no_transition');
 
         const editableOffsetTop = this.$editable.offset().top - manipulatorOffset.top;
         this.$el.toggleClass('o_top_cover', offset.top - editableOffsetTop < 25);
@@ -893,7 +908,7 @@ var SnippetEditor = Widget.extend({
                 const gridRowSize = gridUtils.rowSize;
                 const boundedYMousePosition = Math.min(args.y, targetRect.bottom - gridRowSize);
                 this.mousePositionYOnElement = boundedYMousePosition - targetRect.y;
-                this.mousePositionXOnElement = args.x - targetRect.x;
+                this.mousePositionXOnElement = (args.x - targetRect.x) * (this.isRtl ? -1 : 1);
                 this._onDragAndDropStart(args);
             },
             onDragEnd: (...args) => {
@@ -1386,7 +1401,7 @@ var SnippetEditor = Widget.extend({
 
             const style = window.getComputedStyle(this.$target[0]);
             const top = parseFloat(style.top);
-            const left = parseFloat(style.left);
+            const left = parseFloat(this.isRtl ? style.right : style.left);
 
             const rowStart = Math.round(top / (gridProp.rowSize + gridProp.rowGap)) + 1;
             const columnStart = Math.round(left / (gridProp.columnSize + gridProp.columnGap)) + 1;
@@ -1616,6 +1631,14 @@ var SnippetEditor = Widget.extend({
             return;
         }
         ev.data.show = this._toggleVisibilityStatus(ev.data.show);
+        // Toggle the value of ev.data.show so that when trigger_up is called,
+        // it passes the value `true` to its parent. Additionally, in this
+        // block, we are calling `trigger_up` with `activate_snippet` to false,
+        // which disables options for that specific block.
+        if (this.$target[0] === ev.target.$target[0] && !ev.data.show) {
+            this.trigger_up("activate_snippet", { $snippet: false });
+            ev.data.show = true;
+        }
     },
     /**
      * @private
@@ -1696,10 +1719,11 @@ var SnippetEditor = Widget.extend({
         }
         const columnEl = this.$target[0];
         const rowEl = columnEl.parentNode;
+        const rowElRect = rowEl.getBoundingClientRect();
 
         // Computing the rowEl position.
-        const rowElTop = rowEl.getBoundingClientRect().top;
-        const rowElLeft = rowEl.getBoundingClientRect().left;
+        const rowElTop = rowElRect.top;
+        const rowElLeft = rowElRect.left;
 
         // Getting the column dimensions.
         const borderWidth = parseFloat(window.getComputedStyle(columnEl).borderWidth);
@@ -1709,14 +1733,25 @@ var SnippetEditor = Widget.extend({
         // Placing the column where the mouse is.
         let top = y - rowElTop - this.mousePositionYOnElement;
         const bottom = top + columnHeight;
-        let left = x - rowElLeft - this.mousePositionXOnElement;
+
+        let left;
+        if (this.isRtl) {
+            const rowElRight = rowElRect.right;
+            left = rowElRight - x - this.mousePositionXOnElement - columnWidth;
+        } else {
+            left = x - rowElLeft - this.mousePositionXOnElement;
+        }
 
         // Horizontal and top overflow.
         left = clamp(left, 0, rowEl.clientWidth - columnWidth);
         top = top < 0 ? 0 : top;
 
         columnEl.style.top = top + 'px';
-        columnEl.style.left = left + 'px';
+        if (this.isRtl) {
+            columnEl.style.right = left + 'px';
+        } else {
+            columnEl.style.left = left + 'px';
+        }
 
         // Computing the drag helper corresponding grid area.
         const gridProp = gridUtils._getGridProperties(rowEl);
@@ -2744,6 +2779,9 @@ var SnippetsMenu = Widget.extend({
                 }
                 resolve(null);
             }).then(async editorToEnable => {
+                if (editorToEnable && editorToEnable.$target[0] && !editorToEnable.$target[0].closest("body")) {
+                    return null;
+                }
                 if (!previewMode && this._enabledEditorHierarchy[0] === editorToEnable
                         || ifInactiveOptions && this._enabledEditorHierarchy.includes(editorToEnable)) {
                     return editorToEnable;
@@ -3229,6 +3267,11 @@ var SnippetsMenu = Widget.extend({
         for (const iframeEl of iframeEls) {
             iframeEl.dataset.oSrcOnDrop = iframeEl.getAttribute("src");
             iframeEl.removeAttribute("src");
+        }
+
+        const filterSelectEl = $html.find("we-select").has("we-button[data-gl-filter]")[0];
+        if (filterSelectEl) {
+            filterSelectEl.dataset.name = "glfilter_select_opt";
         }
     },
     /**
@@ -4399,11 +4442,24 @@ var SnippetsMenu = Widget.extend({
      */
     _onSnippetClick() {
         const $els = this.getEditableArea().find('.oe_structure.oe_empty').addBack('.oe_structure.oe_empty');
-        for (const el of $els) {
-            if (!el.children.length) {
-                $(el).odooBounce('o_we_snippet_area_animation');
-            }
+        const snippetEls = [...$els].filter((el) => !el.children.length);
+        if (!snippetEls.length) {
+            return;
         }
+
+        this.options.wysiwyg.odooEditor.observerUnactive();
+        for (const el of snippetEls) {
+            el.classList.add("o_catch_attention", "o_we_snippet_area_animation");
+        }
+        this.options.wysiwyg.odooEditor.observerActive();
+
+        setTimeout(() => {
+            this.options.wysiwyg.odooEditor.observerUnactive();
+            for (const el of snippetEls) {
+                el.classList.remove("o_catch_attention", "o_we_snippet_area_animation");
+            }
+            this.options.wysiwyg.odooEditor.observerActive();
+        }, 400);
     },
     /**
      * @private

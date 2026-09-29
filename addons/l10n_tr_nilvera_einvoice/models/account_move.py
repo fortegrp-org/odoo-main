@@ -1,4 +1,5 @@
 import uuid
+from base64 import b64decode
 from markupsafe import Markup
 from urllib.parse import quote, urlencode, urlparse
 
@@ -126,28 +127,29 @@ class AccountMove(models.Model):
         )
 
     def _l10n_tr_nilvera_get_submitted_document_status(self):
-        with _get_nilvera_client(self.env.company) as client:
-            for invoice in self:
-                response = client.request(
-                    "GET",
-                    f"/einvoice/sale/{invoice.l10n_tr_nilvera_uuid}/Status",
-                )
+        for company, invoices in self.grouped('company_id').items():
+            with _get_nilvera_client(company) as client:
+                for invoice in invoices:
+                    response = client.request(
+                        "GET",
+                        f"/einvoice/sale/{invoice.l10n_tr_nilvera_uuid}/Status",
+                    )
 
-                nilvera_status = response.get('InvoiceStatus', {}).get('Code')
-                if nilvera_status in dict(invoice._fields['l10n_tr_nilvera_send_status'].selection):
-                    invoice.l10n_tr_nilvera_send_status = nilvera_status
-                    if nilvera_status == 'error':
-                        invoice.message_post(
-                            body=Markup(
-                                "%s<br/>%s - %s<br/>"
-                            ) % (
-                                _("The invoice couldn't be sent to the recipient."),
-                                response['InvoiceStatus'].get('Description'),
-                                response['InvoiceStatus'].get('DetailDescription'),
+                    nilvera_status = response.get('InvoiceStatus', {}).get('Code')
+                    if nilvera_status in dict(invoice._fields['l10n_tr_nilvera_send_status'].selection):
+                        invoice.l10n_tr_nilvera_send_status = nilvera_status
+                        if nilvera_status == 'error':
+                            invoice.message_post(
+                                body=Markup(
+                                    "%s<br/>%s - %s<br/>"
+                                ) % (
+                                    _("The invoice couldn't be sent to the recipient."),
+                                    response['InvoiceStatus'].get('Description'),
+                                    response['InvoiceStatus'].get('DetailDescription'),
+                                )
                             )
-                        )
-                else:
-                    invoice.message_post(body=_("The invoice status couldn't be retrieved from Nilvera."))
+                    else:
+                        invoice.message_post(body=_("The invoice status couldn't be retrieved from Nilvera."))
 
     def _l10n_tr_nilvera_get_documents(self):
         with _get_nilvera_client(self.env.company) as client:
@@ -178,6 +180,7 @@ class AccountMove(models.Model):
                     continue
                 move = self._l10n_tr_nilvera_get_invoice_from_uuid(client, journal, document_uuid)
                 self._l10n_tr_nilvera_add_pdf_to_invoice(client, move, document_uuid)
+                # The purpose of this commit is to ensure that both the move and attachment are saved before the next iteration in case of errors.
                 self._cr.commit()
 
     def _l10n_tr_nilvera_get_invoice_from_uuid(self, client, journal, document_uuid):
@@ -232,7 +235,7 @@ class AccountMove(models.Model):
             'name': filename,
             'res_id': invoice.id,
             'res_model': 'account.move',
-            'datas': response,
+            'raw': b64decode(response),
             'type': 'binary',
             'mimetype': 'application/pdf',
         })
@@ -256,15 +259,41 @@ class AccountMove(models.Model):
 
         return msg, error_codes
 
+    def _l10n_tr_nilvera_einvoice_check_invalid_subscription_dates(self):
+        if 'deferred_start_date' not in self.invoice_line_ids._fields:
+            return False
+
+        # Ensure that either no lines have the start and end dates or all lines have the same start and end dates.
+        lines_to_check = self.invoice_line_ids.filtered(lambda line: line.display_type == 'product')
+        if not (subscription_lines := lines_to_check.filtered('deferred_start_date')):
+            return False
+
+        return len(subscription_lines) != len(lines_to_check) or len(set(subscription_lines.mapped(
+            lambda aml: (aml.deferred_start_date, aml.deferred_end_date))
+        )) > 1
+
+    def _l10n_tr_nilvera_einvoice_check_negative_lines(self):
+        return any(
+            line.display_type not in {'line_note', 'line_section'}
+            and (line.quantity < 0 or line.price_unit < 0)
+            for line in self.invoice_line_ids
+        )
+
     # -------------------------------------------------------------------------
     # CRONS
     # -------------------------------------------------------------------------
 
+    def _l10n_tr_nilvera_company_get_documents(self):
+        for company in self.env.companies:
+            if company.country_code != 'TR' or not company.l10n_tr_nilvera_api_key:
+                continue
+            self.with_company(company)._l10n_tr_nilvera_get_documents()
+
     def _cron_nilvera_get_new_documents(self):
-        self._l10n_tr_nilvera_get_documents()
+        self._l10n_tr_nilvera_company_get_documents()
 
     def _cron_nilvera_get_invoice_status(self):
         invoices_to_update = self.env['account.move'].search([
-            ('l10n_tr_nilvera_send_status', 'in', ['waiting', 'sent']),
+            ('l10n_tr_nilvera_send_status', 'in', ['waiting', 'sent', 'unknown']),
         ])
         invoices_to_update._l10n_tr_nilvera_get_submitted_document_status()

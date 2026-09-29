@@ -1,26 +1,28 @@
 # Translation of Odoo Server.
 # This file contains the translation of the following modules:
 # 	* delivery
-# 
+#
 # Translators:
 # Kostas Goutoudis <goutoudis@gmail.com>, 2024
 # George Tarasidis <george_tarasidis@yahoo.com>, 2024
 # Martin Trigaux, 2025
 # Agapi Psyllou, 2025
-# 
+#
 msgid ""
 msgstr ""
 "Project-Id-Version: Odoo Server 17.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-02-10 10:34+0000\n"
-"PO-Revision-Date: 2023-10-26 23:09+0000\n"
-"Last-Translator: Agapi Psyllou, 2025\n"
-"Language-Team: Greek (https://app.transifex.com/odoo/teams/41243/el/)\n"
+"POT-Creation-Date: 2025-12-29 18:37+0000\n"
+"PO-Revision-Date: 2026-08-08 05:42+0000\n"
+"Last-Translator: Anonymous <noreply@weblate.org>\n"
+"Language-Team: Greek <https://translate.odoo.com/projects/odoo-17/delivery/"
+"el/>\n"
+"Language: el\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: \n"
-"Language: el\n"
-"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+"Plural-Forms: nplurals=2; plural=n != 1;\n"
+"X-Generator: Weblate 2026.6.1\n"
 
 #. module: delivery
 #. odoo-python
@@ -55,7 +57,8 @@ msgstr ""
 #: model_terms:ir.ui.view,arch_db:delivery.view_delivery_carrier_form
 msgid ""
 "<span class=\"o_stat_text o_warning_text fw-bold\">Test</span>\n"
-"                                <span class=\"o_stat_text\">Environment</span>"
+"                                <span class=\"o_stat_text\">Environment</"
+"span>"
 msgstr ""
 "<span class=\"o_stat_text o_warning_text fw-bold\">Δοκιμαστικό</span>\n"
 "                                <span class=\"o_stat_text\">Περιβάλλον</span>"
@@ -74,7 +77,8 @@ msgstr ""
 #: model_terms:ir.ui.view,arch_db:delivery.view_delivery_carrier_form
 msgid ""
 "<span class=\"text-success\">Production</span>\n"
-"                                <span class=\"o_stat_text\">Environment</span>"
+"                                <span class=\"o_stat_text\">Environment</"
+"span>"
 msgstr ""
 
 #. module: delivery
@@ -90,8 +94,8 @@ msgid ""
 "for customers to follow."
 msgstr ""
 "Μία περιγραφή του τρόπου παράδοσης που θέλετε να επικοινωνήσετε στους "
-"πελάτες σας στην Παραγγελία Πώλησης και στο email επιβεβαίωσης πώλησης. Π.χ."
-" οδηγίες για να ακολουθήσουν οι πελάτες."
+"πελάτες σας στην Παραγγελία Πώλησης και στο email επιβεβαίωσης πώλησης. Π.χ. "
+"οδηγίες για να ακολουθήσουν οι πελάτες."
 
 #. module: delivery
 #: model:ir.model.fields,help:delivery.field_delivery_carrier__integration_level
@@ -360,7 +364,6 @@ msgstr "Περιβάλλον"
 #. module: delivery
 #. odoo-python
 #: code:addons/delivery/models/delivery_carrier.py:0
-#: code:addons/delivery/models/delivery_carrier.py:0
 #, python-format
 msgid "Error: this delivery method is not available for this address."
 msgstr ""
@@ -376,11 +379,15 @@ msgstr "Σφάλμα: αυτός ο τρόπος παράδοσης δεν εί�
 #. module: delivery
 #: model:ir.model.fields,help:delivery.field_delivery_carrier__invoice_policy
 msgid ""
-"Estimated Cost: the customer will be invoiced the estimated cost of the shipping.\n"
-"Real Cost: the customer will be invoiced the real cost of the shipping, the cost of theshipping will be updated on the SO after the delivery."
+"Estimated Cost: the customer will be invoiced the estimated cost of the "
+"shipping.\n"
+"Real Cost: the customer will be invoiced the real cost of the shipping, the "
+"cost of theshipping will be updated on the SO after the delivery."
 msgstr ""
 "Εκτιμώμενο Κόστος: ο πελάτης θα τιμολογηθεί το εκτιμώμενο κόστος αποστολής.\n"
-"Πραγματικό Κόστος: ο πελάτης θα τιμολογηθεί το πραγματικό κόστος της αποστολής, το κόστος αποστολής θα ενημρωθεί στην Παραγγελία Πώλησης μετά την παράδοση."
+"Πραγματικό Κόστος: ο πελάτης θα τιμολογηθεί το πραγματικό κόστος της "
+"αποστολής, το κόστος αποστολής θα ενημρωθεί στην Παραγγελία Πώλησης μετά την "
+"παράδοση."
 
 #. module: delivery
 #: model:ir.model.fields.selection,name:delivery.selection__delivery_carrier__invoice_policy__estimated
@@ -752,8 +759,7 @@ msgstr ""
 #. module: delivery
 #: model:ir.model.constraint,message:delivery.constraint_delivery_carrier_shipping_insurance_is_percentage
 msgid "The shipping insurance must be a percentage between 0 and 100."
-msgstr ""
-"Η ασφάλεια αποστολής πρέπει να είναι ένα ποσοστό ανάμεσα σε 0 και 100."
+msgstr "Η ασφάλεια αποστολής πρέπει να είναι ένα ποσοστό ανάμεσα σε 0 και 100."
 
 #. module: delivery
 #. odoo-python
@@ -839,9 +845,11 @@ msgstr ""
 #: code:addons/delivery/models/sale_order.py:0
 #, python-format
 msgid ""
-"You can not update the shipping costs on an order where it was already invoiced!\n"
+"You can not update the shipping costs on an order where it was already "
+"invoiced!\n"
 "\n"
-"The following delivery lines (product, invoiced quantity and price) have already been processed:\n"
+"The following delivery lines (product, invoiced quantity and price) have "
+"already been processed:\n"
 "\n"
 msgstr ""
 

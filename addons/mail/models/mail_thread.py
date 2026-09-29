@@ -7,6 +7,7 @@ import datetime
 import dateutil
 import email
 import email.policy
+import encodings
 import hashlib
 import hmac
 import json
@@ -28,15 +29,22 @@ from markupsafe import Markup, escape
 from odoo import _, api, exceptions, fields, models, tools, registry, SUPERUSER_ID, Command
 from odoo.exceptions import MissingError, AccessError
 from odoo.osv import expression
-from odoo.tools import is_html_empty, html_escape, html2plaintext, parse_contact_from_email
+from odoo.tools import email_normalize, is_html_empty, html_escape, html2plaintext, parse_contact_from_email, SQL
 from odoo.tools.misc import clean_context, split_every
 
 from requests import Session
-from ..web_push import push_to_end_point, DeviceUnreachableError
+from ..web_push import push_to_end_point, DeviceUnreachableError, ENCRYPTION_BLOCK_OVERHEAD, ENCRYPTION_HEADER_SIZE, MAX_PAYLOAD_SIZE
 
 MAX_DIRECT_PUSH = 5
+BAD_CONTENT_TYPES = ('binary/octet-stream', '*/*', 'bin/plain')  # replaced by application/octet-stream
 
 _logger = logging.getLogger(__name__)
+
+# monkey-patching encodings so that it will recognize `charset=cp-850` in emails
+# as a correct alias for cp850 when decoding email parts with the email python library.
+# The key "cp_850" will implicitly match "cp_850" and "cp-850"
+# See https://stackoverflow.com/a/51961225
+encodings.aliases.aliases['cp_850'] = 'cp850'
 
 
 class MailThread(models.AbstractModel):
@@ -891,15 +899,15 @@ class MailThread(models.AbstractModel):
         If the email is related to a partner, we consider that the number of message_bounce
         is not relevant anymore as the email is valid - as we received an email from this
         address. The model is here hardcoded because we cannot know with which model the
-        incomming mail match. We consider that if a mail arrives, we have to clear bounce for
+        incoming mail match. We consider that if a mail arrives, we have to clear bounce for
         each model having bounce count.
 
         :param email_from: email address that sent the incoming email."""
-        valid_email = message_dict['email_from']
-        if valid_email:
+        normalized_from = email_normalize(message_dict['email_from'])
+        if normalized_from:
             bl_models = self.env['ir.model'].sudo().search(['&', ('is_mail_blacklist', '=', True), ('model', '!=', 'mail.thread.blacklist')])
             for model in [bl_model for bl_model in bl_models if bl_model.model in self.env]:  # transient test mode
-                self.env[model.model].sudo().search([('message_bounce', '>', 0), ('email_normalized', '=', valid_email)])._message_reset_bounce(valid_email)
+                self.env[model.model].sudo().search([('message_bounce', '>', 0), ('email_normalized', '=', normalized_from)])._message_reset_bounce(normalized_from)
 
     @api.model
     def _detect_is_bounce(self, message, message_dict):
@@ -1184,12 +1192,12 @@ class MailThread(models.AbstractModel):
             user_id = self._mail_find_user_for_gateway(email_from, alias=dest_aliases).id or self._uid
             route = self._routing_check_route(
                 message, message_dict,
-                (reply_model, reply_thread_id, custom_values, user_id, dest_aliases),
+                (reply_model, reply_thread_id, None, user_id, dest_aliases),
                 raise_exception=False)
             if route:
                 _logger.info(
                     'Routing mail from %s to %s with Message-Id %s: direct reply to msg: model: %s, thread_id: %s, custom_values: %s, uid: %s',
-                    email_from, message_dict['to'], message_id, reply_model, reply_thread_id, custom_values, self._uid)
+                    email_from, message_dict['to'], message_id, reply_model, reply_thread_id, None, self._uid)
                 return [route]
             if route is False:
                 return []
@@ -1290,7 +1298,11 @@ class MailThread(models.AbstractModel):
 
             # disabled subscriptions during message_new/update to avoid having the system user running the
             # email gateway become a follower of all inbound messages
-            ModelCtx = Model.with_user(related_user).sudo()
+            ModelCtx = Model
+            if alias:
+                if self.env.is_system():
+                    ModelCtx = Model.with_user(related_user)
+                ModelCtx = ModelCtx.sudo()
             if thread_id and hasattr(ModelCtx, 'message_update'):
                 thread = ModelCtx.browse(thread_id)
                 thread.message_update(message_dict)
@@ -1393,10 +1405,18 @@ class MailThread(models.AbstractModel):
         if strip_attachments:
             msg_dict.pop('attachments', None)
 
-        existing_msg_ids = self.env['mail.message'].search([('message_id', '=', msg_dict['message_id'])], limit=1)
-        if existing_msg_ids:
+        msg_id = msg_dict.get('message_id')
+        is_duplicate = bool(self.env['mail.message'].search_count([('message_id', '=', msg_id)], limit=1))
+        if not is_duplicate and msg_id:
+            # Synchronize concurrent transactions for the same message_id to make the duplicate check reliable.
+            # Use pg_try_advisory_xact_lock: if another transaction is already processing the same message_id,
+            # treat it as a duplicate.
+            self.env.cr.execute(SQL('SELECT pg_try_advisory_xact_lock(hashtext(%s))', msg_id))
+            is_duplicate = not self.env.cr.fetchone()[0]
+
+        if is_duplicate:
             _logger.info('Ignored mail from %s to %s with Message-Id %s: found duplicated Message-Id during processing',
-                         msg_dict.get('email_from'), msg_dict.get('to'), msg_dict.get('message_id'))
+                         msg_dict.get('email_from'), msg_dict.get('to'), msg_id)
             return False
 
         if self._detect_loop_headers(msg_dict):
@@ -1562,8 +1582,8 @@ class MailThread(models.AbstractModel):
                     # the parent email that might be added at the end
                     # (e.g. for outlook / yahoo bounce email)
                     break
-                if part.get_content_type() == 'binary/octet-stream':
-                    _logger.warning("Message containing an unexpected Content-Type 'binary/octet-stream', assuming 'application/octet-stream'")
+                if (bad_content_type := part.get_content_type()) in BAD_CONTENT_TYPES:
+                    _logger.warning("Message containing an unexpected Content-Type %r, assuming 'application/octet-stream'", bad_content_type)
                     part.replace_header('Content-Type', 'application/octet-stream')
                 if part.get_content_type() == 'multipart/alternative':
                     alternative = True
@@ -3613,6 +3633,7 @@ class MailThread(models.AbstractModel):
                 ('model', '=', message_sudo.model), ('res_id', '=', message_sudo.res_id),
                 ('id', '!=', message_sudo.id),
                 ('subtype_id', '!=', False),  # filters out logs
+                ('message_id', '!=', False),  # ignore records that somehow don't have a message_id (non ORM created)
             ], limit=32, order='id DESC',  # take 32 last, hoping to find public discussions in it
         )
 
@@ -3929,31 +3950,17 @@ class MailThread(models.AbstractModel):
 
     def _notify_get_action_link(self, link_type, **kwargs):
         """ Prepare link to an action: view document, follow document, ... """
-        params = {
-            'model': kwargs.get('model', self._name),
-            'res_id': kwargs.get('res_id', self.ids and self.ids[0] or False),
-        }
-        # keep only accepted parameters:
-        # - action (deprecated), token (assign), access_token (view)
-        # - auth_signup: auth_signup_token and auth_login
-        # - portal: pid, hash
-        params.update(dict(
-            (key, value)
-            for key, value in kwargs.items()
-            if key in ('action', 'token', 'access_token', 'auth_signup_token',
-                       'auth_login', 'pid', 'hash')
-        ))
+        params = self._get_action_link_params(link_type, **kwargs)
 
         if link_type in ['view', 'assign', 'follow', 'unfollow']:
             base_link = '/mail/%s' % link_type
         elif link_type == 'controller':
             controller = kwargs.get('controller')
-            params.pop('model')
             base_link = '%s' % controller
         else:
             return ''
 
-        if link_type not in ['view']:
+        if link_type != 'view':
             token = self._encode_link(base_link, params)
             params['token'] = token
 
@@ -3969,6 +3976,28 @@ class MailThread(models.AbstractModel):
         token = '%s?%s' % (base_link, ' '.join('%s=%s' % (key, params[key]) for key in sorted(params)))
         hm = hmac.new(secret.encode('utf-8'), token.encode('utf-8'), hashlib.sha1).hexdigest()
         return hm
+
+    def _get_action_link_params(self, link_type, **kwargs):
+        """ Parameters management for '_notify_get_action_link' """
+        params = {
+            'model': kwargs.get('model', self._name),
+            'res_id': kwargs.get('res_id', self.ids[0] if self else False),
+        }
+        # keep only accepted parameters:
+        # - action (deprecated), token (assign), access_token (view)
+        # - auth_signup: auth_signup_token and auth_login
+        # - portal: pid, hash
+        params.update({
+            key: value
+            for key, value in kwargs.items()
+            if key in ('action', 'token', 'access_token', 'auth_signup_token',
+                       'auth_login', 'pid', 'hash')
+        })
+        if link_type == 'controller':
+            params.pop('model')
+        elif link_type not in ['view', 'assign', 'follow', 'unfollow']:
+            return {}
+        return params
 
     @api.model
     def _get_model_description(self, model_name):
@@ -4366,16 +4395,18 @@ class MailThread(models.AbstractModel):
         res = {'hasWriteAccess': False, 'hasReadAccess': True}
         if not self:
             res['hasReadAccess'] = False
+            res['canPostOnReadonly'] = False
             return res
-        res['canPostOnReadonly'] = self._mail_post_access == 'read'
 
         self.ensure_one()
+        res['canPostOnReadonly'] = self._get_mail_message_access(self.ids, 'create') == "read"
         try:
             self.check_access_rights("write")
             self.check_access_rule("write")
             res['hasWriteAccess'] = True
         except AccessError:
             pass
+
         if 'activities' in request_list:
             res['activities'] = self.with_context(active_test=True).activity_ids.activity_format()
         if 'attachments' in request_list:
@@ -4429,19 +4460,74 @@ class MailThread(models.AbstractModel):
         return list(pids)
 
     def _truncate_payload(self, payload):
+        r"""Check the payload limit of ~3990 bytes to avoid 413 error return code.
+
+        See `_truncate_payload_get_max_payload_length` for the exact limit.
+
+        When sending a push notification, the entire encrypted json payload should be no more than 4096 bytes in length.
+        To ensure this, when possible, the body contents of the notification are truncated in such a way that the end
+        result will not exceed that limit.
+
+        Example Truncation:
+            We know there is an encryption overhead of 10 bytes, and a total limit of 50 bytes.
+            The payload is `{"messageId": "5291", "body": "A very long text"}`
+            So we have an effective payload length of (50 - 10) = 40.
+            Our full payload is 49 bytes, of which 16 bytes are text we are willing to truncate.
+            We must remove 9 bytes, such that the payload becomes effectively
+            `{"messageId": "5291", "body": "A very "}`
+
+        There are some considerations with this approach. Notably we must consider the full encoded length in bytes.
+        While we encode the payload in utf-8, it is actually transformed into json with `ensure_ascii=True` first.
+        This means this payload, as a python dictionary: {"body": "BØDY"}; Becomes {"body": "B\\u00d8DY"}.
+        Where `00d8` is the unicode codepoint for "Ø", and "\\u" is a json escape sequence.
+
+        In that case we must ensure that the truncated body does not suddenly contain invalid unicode escape sequences.
+        Similarly to how one should not cut an encoded string in the middle of a utf-8 character.
+
+        Example Unicode Truncation:
+            Assume {"body": "BØDY"} needs to be truncated of 3 bytes
+            It should not become {"body": "B\\u00d"}
+            Instead it should become {"body": "B"}
+
+        :param dict payload: Current payload to truncate.
+        :return: The truncated payload;
         """
-        Check the payload limit of 4096 bytes to avoid 413 error return code.
-        If the payload is too big, we trunc the body value.
-        :param dict payload: Current payload to trunc
-        :return: The truncate payload;
-        """
-        payload_length = len(str(payload).encode())
-        body = payload['options']['body']
+        payload_length = len(json.dumps(payload).encode())
+        # json.dumps defaults to translating unicode to hex codepoints (ensure_ascii=True)
+        # hence we need to check the length the body takes up in that format
+        # json string quotes are removed and the body is not encoded as it's already all ASCII
+        body = json.dumps(payload['options']['body'])[1:-1]
         body_length = len(body)
-        if payload_length > 4096:
-            body_max_length = 4096 - payload_length - body_length
-            payload['options']['body'] = body.encode()[:body_max_length].decode(errors="ignore")
+
+        max_length = self._truncate_payload_get_max_payload_length()
+        if payload_length > max_length:
+            body_max_length = max(0, max_length - payload_length + body_length)
+            # truncate to max length and try to loads again
+            # if there's any error, it will be a unicode error
+            # the error position gives us the start of the codepoint
+            # remove everything after that + the preceding escape marker (\u)
+            try:
+                # remove trailing '\' as the error for that is unhelpful
+                truncated_body = body[:body_max_length].rstrip('\\')
+                truncated_body = json.loads(f'"{truncated_body}"')
+            except json.decoder.JSONDecodeError as json_error:
+                truncated_body = json.loads(f'"{body[:json_error.pos - 2]}"')
+            payload['options']['body'] = truncated_body
         return payload
+
+    @staticmethod
+    def _truncate_payload_get_max_payload_length():
+        """Define the maximum length we want for the payload.
+
+        This limit is derived from:
+            - the maximum encrypted payload size we may send to web push servers.
+            - the header required using AES128GCM encryption.
+            - the overhead of encrypting one block. Payload will not exceed 1 block
+            as the point here is to keep everything within the default (and max) block size.
+        For details about encryption overhead sizes, see variable definition in web_push.
+        Currently all of these values are payload-independant.
+        """
+        return MAX_PAYLOAD_SIZE - ENCRYPTION_HEADER_SIZE - ENCRYPTION_BLOCK_OVERHEAD
 
     def _notify_thread_by_web_push(self, message, recipients_data, msg_vals=False, **kwargs):
         """ Method to send cloud notifications for every mention of a partner
@@ -4559,7 +4645,7 @@ class MailThread(models.AbstractModel):
                 }
             }
         }
-        payload['options']['body'] = tools.html2plaintext(body)
+        payload['options']['body'] = html2plaintext(body, include_references=False)
         payload['options']['body'] += self._generate_tracking_message(message)
 
         return payload

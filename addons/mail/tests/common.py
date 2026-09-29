@@ -650,7 +650,7 @@ class MockEmail(common.BaseCase, MockSmtplibCase):
         a dict for fields. Allows to hide a lot of assertEqual under a simple
         call with a dictionary of expected values. """
         for fname, fvalue in fields_values.items():
-            with self.subTest(fname=fname, fvalue=fvalue):
+            with self.subTest(fname=fname, fvalue=str(fvalue)):
                 self.assertEqual(
                     message[fname], fvalue,
                     f'Message: expected {fvalue} for {fname}, got {message[fname]}',
@@ -930,7 +930,6 @@ class MailCase(MockEmail):
         cls.email_template = cls.env['mail.template'].create(create_values)
         return cls.email_template
 
-
     def _generate_notify_recipients(self, partners, record=None):
         """ Tool method to generate recipients data according to structure used
         in notification methods. Purpose is to allow testing of internals of
@@ -950,6 +949,29 @@ class MailCase(MockEmail):
              'ushare': all(user.share for user in partner.user_ids) if partner.user_ids else False,
             } for partner in partners
         ]
+
+    def _get_mail_composer_web_context(self, records, add_web=True, **values):
+        """ Helper to generate composer context. Will make tests a bit less
+        verbose.
+
+        :param bool add_web: add web context, generally making noise especially in
+          mass mail mode (active_id/ids both present in context)
+        """
+        base_context = {
+            'default_model': records._name,
+            'default_res_ids': records.ids,
+        }
+        if len(records) == 1:
+            base_context['default_composition_mode'] = 'comment'
+        else:
+            base_context['default_composition_mode'] = 'mass_mail'
+        if add_web:
+            base_context['active_model'] = records._name
+            base_context['active_id'] = records[0].id
+            base_context['active_ids'] = records.ids
+        if values:
+            base_context.update(**values)
+        return base_context
 
     # ------------------------------------------------------------
     # MAIL ASSERTS WRAPPERS
@@ -1087,13 +1109,18 @@ class MailCase(MockEmail):
                     mbody in message.body and message.message_type == mtype and
                     message.subtype_id == msubtype
                 ))
+                debug_info = '\n'.join(
+                    f'Msg: message_type {message.message_type}, subtype {message.subtype_id.name}, content {message.body}'
+                    for message in messages
+                )
             else:
                 message = self.env['mail.message'].sudo().search([
                     ('body', 'ilike', mbody),
                     ('message_type', '=', mtype),
                     ('subtype_id', '=', msubtype.id)
                 ], limit=1, order='id DESC')
-            self.assertTrue(message, 'Mail: not found message (content: %s, message_type: %s, subtype: %s)' % (mbody, mtype, msubtype.name))
+                debug_info = ''
+            self.assertTrue(message, 'Mail: not found message (content: %s, message_type: %s, subtype: %s\n%s)' % (mbody, mtype, msubtype.name, debug_info))
 
             # check message values
             message_values = message_info.get('message_values', {})

@@ -1,28 +1,29 @@
 # Translation of Odoo Server.
 # This file contains the translation of the following modules:
 # 	* phone_validation
-# 
+#
 # Translators:
 # Wil Odoo, 2023
 # Rasareeyar Lappiam, 2024
-# 
+#
 msgid ""
 msgstr ""
 "Project-Id-Version: Odoo Server 17.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2023-10-26 21:56+0000\n"
-"PO-Revision-Date: 2023-10-26 23:09+0000\n"
-"Last-Translator: Rasareeyar Lappiam, 2024\n"
-"Language-Team: Thai (https://app.transifex.com/odoo/teams/41243/th/)\n"
+"POT-Creation-Date: 2025-12-29 18:38+0000\n"
+"PO-Revision-Date: 2026-08-05 04:09+0000\n"
+"Last-Translator: Anonymous <noreply@weblate.org>\n"
+"Language-Team: Thai <https://translate.odoo.com/projects/odoo-17/"
+"phone_validation/th/>\n"
+"Language: th\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: \n"
-"Language: th\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
+"X-Generator: Weblate 2026.6.1\n"
 
 #. module: phone_validation
 #. odoo-python
-#: code:addons/phone_validation/models/phone_blacklist.py:0
 #: code:addons/phone_validation/models/phone_blacklist.py:0
 #, python-format
 msgid " Please correct the number and try again."
@@ -52,6 +53,7 @@ msgstr "เก็บถาวรแล้ว"
 
 #. module: phone_validation
 #. odoo-python
+#: code:addons/phone_validation/models/mail_thread_phone.py:0
 #: code:addons/phone_validation/models/phone_blacklist.py:0
 #, python-format
 msgid "Are you sure you want to unblacklist this Phone Number?"
@@ -106,8 +108,7 @@ msgid ""
 "Blocked by deletion of portal account %(portal_user_name)s by %(user_name)s "
 "(#%(user_id)s)"
 msgstr ""
-"ถูกบล็อกโดยการลบบัญชีพอร์ทัล %(portal_user_name)s โดย %(user_name)s "
-"(#%(user_id)s)"
+"ถูกบล็อกโดยการลบบัญชีพอร์ทัล %(portal_user_name)s โดย %(user_name)s (#%(user_id)s)"
 
 #. module: phone_validation
 #: model_terms:ir.ui.view,arch_db:phone_validation.phone_blacklist_remove_view_form
@@ -147,8 +148,7 @@ msgstr "แสดงชื่อ"
 msgid ""
 "Field used to store sanitized phone number. Helps speeding up searches and "
 "comparisons."
-msgstr ""
-"ช่องที่ใช้เก็บหมายเลขโทรศัพท์ที่ถูกต้อง ช่วยเร่งการค้นหาและเปรียบเทียบ"
+msgstr "ช่องที่ใช้เก็บหมายเลขโทรศัพท์ที่ถูกต้อง ช่วยเร่งการค้นหาและเปรียบเทียบ"
 
 #. module: phone_validation
 #: model:ir.model.fields,field_description:phone_validation.field_mail_thread_phone__message_follower_ids
@@ -189,11 +189,11 @@ msgstr "ถ้าเลือก ข้อความบางข้อคว�
 #. module: phone_validation
 #: model:ir.model.fields,help:phone_validation.field_mail_thread_phone__phone_sanitized_blacklisted
 msgid ""
-"If the sanitized phone number is on the blacklist, the contact won't receive"
-" mass mailing sms anymore, from any list"
+"If the sanitized phone number is on the blacklist, the contact won't receive "
+"mass mailing sms anymore, from any list"
 msgstr ""
-"หากหมายเลขโทรศัพท์ที่ถูกต้องอยู่ในบัญชีแบล็คลิสต์ ผู้ติดต่อจะไม่ได้รับ SMS "
-"ทางเมลกลุ่มจากรายการใดๆ อีกต่อไป"
+"หากหมายเลขโทรศัพท์ที่ถูกต้องอยู่ในบัญชีแบล็คลิสต์ ผู้ติดต่อจะไม่ได้รับ SMS ทางเมลกลุ่มจากรายการใดๆ "
+"อีกต่อไป"
 
 #. module: phone_validation
 #. odoo-python
@@ -219,8 +219,6 @@ msgstr "หมายเลขที่เป็นไปไม่ได้ %s: �
 #. module: phone_validation
 #. odoo-python
 #: code:addons/phone_validation/tools/phone_validation.py:0
-#: code:addons/phone_validation/tools/phone_validation.py:0
-#: code:addons/phone_validation/tools/phone_validation.py:0
 #, python-format
 msgid "Impossible number %s: too many digits."
 msgstr "หมายเลขที่เป็นไปไม่ได้ %s: มีตัวเลขมากเกินไป"
@@ -232,9 +230,8 @@ msgid ""
 "distinguish which number is blacklisted             when there is both a "
 "mobile and phone field in a model."
 msgstr ""
-"ระบุว่าหมายเลขโทรศัพท์ที่ถูกต้องในบัญชีแบล็คลิสต์เป็นหมายเลขโทรศัพท์มือถือหรือไม่"
-" "
-"ช่วยแยกแยะว่าหมายเลขใดถูกขึ้นบัญชีแบล็คลิสต์เมื่อมีทั้งฟิลด์มือถือและโทรศัพท์ในโมเดล"
+"ระบุว่าหมายเลขโทรศัพท์ที่ถูกต้องในบัญชีแบล็คลิสต์เป็นหมายเลขโทรศัพท์มือถือหรือไม่ ช่วยแยกแยะว่าหมาย"
+"เลขใดถูกขึ้นบัญชีแบล็คลิสต์เมื่อมีทั้งฟิลด์มือถือและโทรศัพท์ในโมเดล"
 
 #. module: phone_validation
 #: model:ir.model.fields,help:phone_validation.field_mail_thread_phone__phone_blacklisted
@@ -243,8 +240,8 @@ msgid ""
 "distinguish which number is blacklisted             when there is both a "
 "mobile and phone field in a model."
 msgstr ""
-"ระบุว่าหมายเลขโทรศัพท์ที่ถูกต้องในบัญชีแบล็คลิสต์เป็นหมายเลขโทรศัพท์หรือไม่ "
-"ช่วยแยกแยะว่าหมายเลขที่ถูกขึ้นบัญชีแบล็คลิสต์เมื่อมีฟิลด์มือถือและโทรศัพท์ในโมเดล"
+"ระบุว่าหมายเลขโทรศัพท์ที่ถูกต้องในบัญชีแบล็คลิสต์เป็นหมายเลขโทรศัพท์หรือไม่ ช่วยแยกแยะว่าหมายเลขที่"
+"ถูกขึ้นบัญชีแบล็คลิสต์เมื่อมีฟิลด์มือถือและโทรศัพท์ในโมเดล"
 
 #. module: phone_validation
 #. odoo-python
@@ -255,7 +252,6 @@ msgstr "หมายเลข %s ไม่ถูกต้อง: คำนำห
 
 #. module: phone_validation
 #. odoo-python
-#: code:addons/phone_validation/models/mail_thread_phone.py:0
 #: code:addons/phone_validation/models/mail_thread_phone.py:0
 #, python-format
 msgid "Invalid primary phone field on model %s"
@@ -414,6 +410,15 @@ msgstr "เหตุผลในการเลิกบล็อก: %(reason)s
 #: model:ir.model,name:phone_validation.model_res_users
 msgid "User"
 msgstr "ผู้ใช้"
+
+#. module: phone_validation
+#. odoo-python
+#: code:addons/phone_validation/models/mail_thread_phone.py:0
+#, python-format
+msgid ""
+"You do not have the access right to unblacklist phone numbers. Please "
+"contact your administrator."
+msgstr ""
 
 #. module: phone_validation
 #: model_terms:ir.ui.view,arch_db:phone_validation.phone_blacklist_remove_view_form

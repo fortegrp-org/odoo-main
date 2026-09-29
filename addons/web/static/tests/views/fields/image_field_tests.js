@@ -8,9 +8,13 @@ import {
     clickSave,
     editInput,
     patchDate,
+    patchWithCleanup,
 } from "@web/../tests/helpers/utils";
+import { browser } from "@web/core/browser/browser";
 import { makeView, setupViewRegistries } from "@web/../tests/views/helpers";
 import { pagerNext } from "@web/../tests/search/helpers";
+
+const { DateTime } = luxon;
 
 const MY_IMAGE =
     "iVBORw0KGgoAAAANSUhEUgAAAAUAAAAFCAYAAACNbyblAAAAHElEQVQI12P4//8/w38GIAXDIBKE0DHxgljNBAAO9TXL0Y4OHwAAAABJRU5ErkJggg==";
@@ -268,7 +272,7 @@ QUnit.module("Fields", (hooks) => {
         // event.target and not from a direct reference to the input element.
         const fileInput = target.querySelector("input[type=file]");
         const fakeInput = {
-            files: [new File([imageData], "fake_file.png", { type: "png" })],
+            files: [new File([imageData], "fake_file.png", { type: "image/png" })],
         };
         fileInput.addEventListener(
             "change",
@@ -332,7 +336,7 @@ QUnit.module("Fields", (hooks) => {
                 new File(
                     [Uint8Array.from([...atob(MY_IMAGE)].map((c) => c.charCodeAt(0)))],
                     "fake_file.png",
-                    { type: "png" }
+                    { type: "image/png" }
                 )
             );
             assert.strictEqual(
@@ -359,7 +363,7 @@ QUnit.module("Fields", (hooks) => {
                 new File(
                     [Uint8Array.from([...atob(PRODUCT_IMAGE)].map((c) => c.charCodeAt(0)))],
                     "fake_file2.gif",
-                    { type: "png" }
+                    { type: "image/png" }
                 )
             );
             assert.strictEqual(
@@ -434,6 +438,56 @@ QUnit.module("Fields", (hooks) => {
             target.querySelector("input.o_input_file").getAttribute("accept"),
             ".png,.jpeg",
             "the input should have the correct ``accept`` attribute"
+        );
+    });
+
+    QUnit.test("ImageField: no camera hint mimetype in the mobile app", async function (assert) {
+        // the app builds its own file chooser out of the accept attribute
+        patchWithCleanup(browser, {
+            navigator: {
+                ...browser.navigator,
+                userAgent: "OdooMobile/1.0 (Linux; Android 13)",
+            },
+        });
+        await makeView({
+            type: "form",
+            resModel: "partner",
+            resId: 1,
+            serverData,
+            arch: `
+                <form>
+                    <field name="document" widget="image" options="{'accepted_file_extensions': '.png'}" />
+                </form>`,
+        });
+        assert.strictEqual(
+            target.querySelector("input.o_input_file").getAttribute("accept"),
+            ".png",
+            "the input should only have the accepted file extensions of the field"
+        );
+    });
+
+    QUnit.test("ImageField: camera hint mimetype on Chromium for Android", async function (assert) {
+        // a mimetype which is not an image is needed to get the camera back, see the ImageField
+        patchWithCleanup(browser, {
+            navigator: {
+                ...browser.navigator,
+                userAgent: "Chrome/0.0.0 (Linux; Android 13; Odoo TestSuite)",
+            },
+        });
+        await makeView({
+            type: "form",
+            resModel: "partner",
+            resId: 1,
+            serverData,
+            arch: `
+                <form>
+                    <field name="document" widget="image" />
+                </form>`,
+        });
+        assert.strictEqual(
+            target.querySelector("input.o_input_file").getAttribute("accept"),
+            "image/*,dummy/allowAndroidCamera",
+            "the input should have the camera hint mimetype on top of the accepted extensions"
         );
     });
 
@@ -705,7 +759,7 @@ QUnit.module("Fields", (hooks) => {
 
         async function setFiles() {
             const list = new DataTransfer();
-            list.items.add(new File([imageData], "fake_file.png", { type: "png" }));
+            list.items.add(new File([imageData], "fake_file.png", { type: "image/png" }));
             const fileInput = target.querySelector("input[type=file]");
             fileInput.files = list.files;
             fileInput.dispatchEvent(new Event("change"));
@@ -908,7 +962,10 @@ QUnit.module("Fields", (hooks) => {
                     <field name="related" widget="image"/>
                 </form>`,
                 async mockRPC(route, { args }, performRpc) {
-                    if (route === "/web/dataset/call_kw/partner/read") {
+                    if (
+                        route === "/web/dataset/call_kw/partner/web_read" ||
+                        route === "/web/dataset/call_kw/partner/web_save"
+                    ) {
                         const res = await performRpc(...arguments);
                         // The mockRPC doesn't implement related fields
                         res[0].related = "3 kb";
@@ -918,7 +975,9 @@ QUnit.module("Fields", (hooks) => {
             });
 
             const initialUnique = Number(getUnique(target.querySelector(".o_field_image img")));
-            assert.ok(initialUnique - 1486375200000 < 100);
+            assert.ok(
+                DateTime.fromMillis(initialUnique).hasSame(DateTime.fromISO("2017-02-06"), "days")
+            );
 
             await editInput(target, ".o_field_widget[name='foo'] input", "grrr");
 
@@ -935,7 +994,7 @@ QUnit.module("Fields", (hooks) => {
                 new File(
                     [Uint8Array.from([...atob(MY_IMAGE)].map((c) => c.charCodeAt(0)))],
                     "fake_file.png",
-                    { type: "png" }
+                    { type: "image/png" }
                 )
             );
             assert.strictEqual(
@@ -947,9 +1006,8 @@ QUnit.module("Fields", (hooks) => {
 
             await clickSave(target);
 
-            assert.ok(
-                Number(getUnique(target.querySelector(".o_field_image img"))) - 1486638000000 < 100
-            );
+            const unique = Number(getUnique(target.querySelector(".o_field_image img")));
+            assert.ok(DateTime.fromMillis(unique).hasSame(DateTime.fromISO("2017-02-09"), "days"));
         }
     );
 });

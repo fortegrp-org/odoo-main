@@ -52,6 +52,7 @@ class HRLeave(models.Model):
         # If the type of leave is overtime deductible, we have to check that the employee has enough extra hours
         for leave in leaves:
             if not leave.overtime_deductible:
+                leave.sudo().overtime_id.unlink()
                 continue
             employee = leave.employee_id.sudo()
             duration = leave.number_of_hours_display
@@ -83,16 +84,8 @@ class HRLeave(models.Model):
         self.sudo().overtime_id.unlink()
         return res
 
-    def _validate_leave_request(self):
-        super()._validate_leave_request()
-        self._update_leaves_overtime()
-
-    def _remove_resource_leave(self):
-        res = super()._remove_resource_leave()
-        self._update_leaves_overtime()
-        return res
-
     def _update_leaves_overtime(self):
+        # Deprecated - will be removed in master
         employee_dates = defaultdict(set)
         for leave in self:
             if leave.employee_id and leave.employee_company_id.hr_attendance_overtime:

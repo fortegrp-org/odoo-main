@@ -12,6 +12,7 @@ import {
     isMarkdownIrMenuIdUrl,
     isIrMenuXmlUrl,
 } from "@spreadsheet/ir_ui_menu/odoo_menu_link_cell";
+import { getNeutralizedLink } from "./neutralized_link";
 
 export async function fetchSpreadsheetModel(env, resModel, resId) {
     const { data, revisions } = await env.services.orm.call(resModel, "join_spreadsheet_session", [
@@ -71,15 +72,7 @@ export async function freezeOdooData(model) {
             const position = { sheetId, col, row };
             const evaluatedCell = model.getters.getEvaluatedCell(position);
             if (containsOdooFunction(cell.content)) {
-                if (
-                    evaluatedCell.type === "text" &&
-                    (isNumber(evaluatedCell.value, DEFAULT_LOCALE) ||
-                        isDateTime(evaluatedCell.value, DEFAULT_LOCALE))
-                ) {
-                    cell.content = `="${evaluatedCell.value}"`;
-                } else {
-                    cell.content = evaluatedCell.value.toString();
-                }
+                cell.content = toFrozenContent(evaluatedCell);
                 if (evaluatedCell.format) {
                     cell.format = getItemId(evaluatedCell.format, data.formats);
                 }
@@ -90,7 +83,7 @@ export async function freezeOdooData(model) {
                         const evaluatedCell = model.getters.getEvaluatedCell(spreadPosition);
                         sheet.cells[xc] = {
                             ...sheet.cells[xc],
-                            content: evaluatedCell.value.toString(),
+                            content: toFrozenContent(evaluatedCell),
                         };
                         if (evaluatedCell.format) {
                             sheet.cells[xc].format = getItemId(evaluatedCell.format, data.formats);
@@ -99,7 +92,7 @@ export async function freezeOdooData(model) {
                 }
             }
             if (containsLinkToOdoo(evaluatedCell.link)) {
-                cell.content = evaluatedCell.link.label;
+                cell.content = `[${evaluatedCell.link.label}](${getNeutralizedLink()})`;
             }
         }
         for (const figure of sheet.figures) {
@@ -116,6 +109,19 @@ export async function freezeOdooData(model) {
     }
     exportGlobalFiltersToSheet(model, data);
     return data;
+}
+
+function toFrozenContent(evaluatedCell) {
+    const value = evaluatedCell.value;
+    if (
+        evaluatedCell.type === "text" &&
+        (isNumber(value, DEFAULT_LOCALE) || isDateTime(value, DEFAULT_LOCALE))
+    ) {
+        return `="${value}"`;
+    } else if (value === "") {
+        return '=""';
+    }
+    return value.toString();
 }
 
 function exportGlobalFiltersToSheet(model, data) {

@@ -8,6 +8,7 @@ import json
 
 from odoo import api, fields, models, _, SUPERUSER_ID
 from odoo.exceptions import UserError, ValidationError
+from odoo.addons.resource.models.utils import Intervals, sum_intervals
 from odoo.tools import float_compare, float_round, format_datetime
 
 
@@ -95,6 +96,7 @@ class MrpWorkorder(models.Model):
     operation_id = fields.Many2one(
         'mrp.routing.workcenter', 'Operation', check_company=True)
         # Should be used differently as BoM can change in the meantime
+    has_worksheet = fields.Boolean(compute='_compute_has_worksheet')
     worksheet = fields.Binary(
         'Worksheet', related='operation_id.worksheet', readonly=True)
     worksheet_type = fields.Selection(
@@ -176,8 +178,10 @@ class MrpWorkorder(models.Model):
                 continue
             if wo.state in ('pending', 'waiting', 'ready'):
                 previous_wos = wo.blocked_by_workorder_ids
-                prev_start = min([workorder.date_start for workorder in previous_wos]) if previous_wos else False
-                prev_finished = max([workorder.date_finished for workorder in previous_wos]) if previous_wos else False
+                previous_starts = previous_wos.filtered('date_start').mapped('date_start')
+                previous_finished = previous_wos.filtered('date_finished').mapped('date_finished')
+                prev_start = min(previous_starts) if previous_starts else False
+                prev_finished = max(previous_finished) if previous_finished else False
                 if wo.state == 'pending' and prev_start and not (prev_start > wo.date_start):
                     infos.append({
                         'color': 'text-primary',
@@ -280,6 +284,8 @@ class MrpWorkorder(models.Model):
 
         for workorder in self:
             workorder.blocked_by_workorder_ids.needed_by_workorder_ids = workorder.needed_by_workorder_ids
+
+        self.end_all()
         res = super().unlink()
         # We need to go through `_action_confirm` for all workorders of the current productions to
         # make sure the links between them are correct (`next_work_order_id` could be obsolete now).
@@ -302,10 +308,10 @@ class MrpWorkorder(models.Model):
                 or (workorder._origin != workorder and workorder._origin.qty_producing and workorder.qty_producing != workorder._origin.qty_producing)):
                 workorder.duration_expected = workorder._get_duration_expected()
 
-    @api.depends('time_ids.duration', 'qty_produced')
+    @api.depends('time_ids.duration', 'time_ids.loss_type', 'qty_produced')
     def _compute_duration(self):
         for order in self:
-            order.duration = sum(order.time_ids.mapped('duration'))
+            order.duration = order.get_duration()
             order.duration_unit = round(order.duration / max(order.qty_produced, 1), 2)  # rounding 2 because it is a time
             if order.duration_expected:
                 order.duration_percent = max(-2147483648, min(2147483647, 100 * (order.duration_expected - order.duration) / order.duration_expected))
@@ -320,7 +326,7 @@ class MrpWorkorder(models.Model):
             return minutes * 60 + seconds
 
         for order in self:
-            old_order_duration = sum(order.time_ids.mapped('duration'))
+            old_order_duration = order.get_duration()
             new_order_duration = order.duration
             if new_order_duration == old_order_duration:
                 continue
@@ -330,6 +336,14 @@ class MrpWorkorder(models.Model):
             if delta_duration > 0:
                 enddate = datetime.now()
                 date_start = enddate - timedelta(seconds=_float_duration_to_second(delta_duration))
+                # If existing entries would overlap with the new one, push the new entry
+                # to start exactly where the latest existing entry ends.
+                end_dates = order.time_ids.filtered('date_end').mapped('date_end')
+                if end_dates:
+                    latest_end = max(end_dates)
+                    if latest_end > date_start:
+                        date_start = latest_end
+                        enddate = latest_end + timedelta(seconds=_float_duration_to_second(delta_duration))
                 if order.duration_expected >= new_order_duration or old_order_duration >= order.duration_expected:
                     # either only productive or only performance (i.e. reduced speed) time respectively
                     self.env['mrp.workcenter.productivity'].create(
@@ -366,6 +380,11 @@ class MrpWorkorder(models.Model):
                 order.progress = order.duration * 100 / order.duration_expected
             else:
                 order.progress = 0
+
+    def _compute_has_worksheet(self):
+        workorders_has_worksheet = self.env['mrp.workorder'].search([('worksheet', '!=', False), ('id', 'in', self.ids)])
+        for order in self:
+            order.has_worksheet = order in workorders_has_worksheet
 
     def _compute_working_users(self):
         """ Checks whether the current user is working, all the users currently working and the last user that worked. """
@@ -552,9 +571,10 @@ class MrpWorkorder(models.Model):
 
     def _cal_cost(self):
         total = 0
-        for wo in self:
-            duration = sum(wo.time_ids.mapped('duration'))
-            total += (duration / 60.0) * wo.workcenter_id.costs_hour
+        for workorder in self:
+            intervals = Intervals([[t.date_start, t.date_end, t] for t in workorder.time_ids])
+            duration = sum_intervals(intervals)
+            total += duration * workorder.workcenter_id.costs_hour
         return total
 
     @api.model
@@ -884,9 +904,23 @@ class MrpWorkorder(models.Model):
             duration += (datetime.now() - time.date_start).total_seconds() / 60
         return duration
 
+    def _intervals_duration(self, intervals):
+        """Return merged interval duration (minutes). Overlapping intervals are counted once."""
+        if not intervals:
+            return 0.0
+        duration = 0
+        for date_start, date_stop, timer in Intervals(intervals):
+            duration += timer.loss_id._convert_to_duration(date_start, date_stop, timer.workcenter_id)
+        return duration
+
     def get_duration(self):
         self.ensure_one()
-        return sum(self.time_ids.mapped('duration')) + self.get_working_duration()
+        now = self.env.cr.now()
+        loss_type_times = self.time_ids.grouped(lambda t: t.loss_id.loss_type)
+        duration = 0
+        for times in loss_type_times.values():
+            duration += self._intervals_duration([(t.date_start or now, t.date_end or now, t) for t in times])
+        return duration
 
     def action_mark_as_done(self):
         for wo in self:

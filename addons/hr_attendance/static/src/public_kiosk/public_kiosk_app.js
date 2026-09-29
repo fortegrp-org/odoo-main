@@ -5,7 +5,6 @@ import { CardLayout } from "@hr_attendance/components/card_layout/card_layout";
 import { KioskManualSelection } from "@hr_attendance/components/manual_selection/manual_selection";
 import { makeEnv, startServices } from "@web/env";
 import { templates } from "@web/core/assets";
-import { isIosApp } from "@web/core/browser/feature_detection";
 import { _t } from "@web/core/l10n/translation";
 import { MainComponentsContainer } from "@web/core/main_components_container";
 import { useService, useBus } from "@web/core/utils/hooks";
@@ -37,6 +36,7 @@ class kioskAttendanceApp extends Component{
         this.rpc = useService("rpc");
         this.barcode = useService("barcode");
         this.notification = useService("notification");
+        this.ui = useService("ui");
         this.companyImageUrl = url("/web/binary/company_logo", {
             company: this.props.companyId,
         });
@@ -89,30 +89,28 @@ class kioskAttendanceApp extends Component{
     }
 
     async makeRpcWithGeolocation(route, params) {
-        if (!isIosApp()) { // iOS app lacks permissions to call `getCurrentPosition`
-            return new Promise((resolve) => {
-                navigator.geolocation.getCurrentPosition(
-                    async ({ coords: { latitude, longitude } }) => {
-                        const result = await this.rpc(route, {
-                            ...params,
-                            latitude,
-                            longitude,
-                        });
-                        resolve(result);
-                    },
-                    async (err) => {
-                        const result = await this.rpc(route, {
-                            ...params
-                        });
-                        resolve(result);
-                    },
-                    { enableHighAccuracy: true }
-                );
-            });
-        }
-        else {
+        if (!navigator.geolocation) {
             return this.rpc(route, {...params})
         }
+        return new Promise((resolve) => {
+            navigator.geolocation.getCurrentPosition(
+                async ({ coords: { latitude, longitude } }) => {
+                    const result = await this.rpc(route, {
+                        ...params,
+                        latitude,
+                        longitude,
+                    });
+                    resolve(result);
+                },
+                async (err) => {
+                    const result = await this.rpc(route, {
+                        ...params
+                    });
+                    resolve(result);
+                },
+                { enableHighAccuracy: true }
+            );
+        });
     }
 
     async onManualSelection(employeeId, enteredPin) {
@@ -137,18 +135,29 @@ class kioskAttendanceApp extends Component{
             return;
         }
         this.lockScanner = true;
-        const result = await this.rpc('attendance_barcode_scanned',
-            {
-                'barcode': barcode,
-                'token': this.props.token
-            })
-        if (result && result.employee_name) {
-            this.employeeData = result
-            this.switchDisplay('greet')
-        }else{
-            this.displayNotification(_t("No employee corresponding to Badge ID '%(barcode)s.'", { barcode }))
+        this.ui.block();
+
+        let result;
+        try {
+            result = await this.rpc("attendance_barcode_scanned", {
+                barcode: barcode,
+                token: this.props.token,
+            });
+
+            if (result && result.employee_name) {
+                this.employeeData = result;
+                this.switchDisplay("greet");
+            } else {
+                this.displayNotification(
+                    _t("No employee corresponding to Badge ID '%(barcode)s.'", { barcode })
+                );
+            }
+        } catch (error) {
+            this.displayNotification(error.data.message);
+        } finally {
+            this.lockScanner = false;
+            this.ui.unblock();
         }
-        this.lockScanner = false
     }
 }
 

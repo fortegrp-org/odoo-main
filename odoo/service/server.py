@@ -17,6 +17,7 @@ import threading
 import time
 import unittest
 import contextlib
+from email.utils import parsedate_to_datetime
 from io import BytesIO
 from itertools import chain
 
@@ -120,6 +121,11 @@ class BaseWSGIServerNoBind(LoggingBaseWSGIServerMixIn, werkzeug.serving.BaseWSGI
 
 
 class RequestHandler(werkzeug.serving.WSGIRequestHandler):
+    def __init__(self, *args, **kwargs):
+        self._sent_date_header = None
+        self._sent_server_header = None
+        super().__init__(*args, **kwargs)
+
     def setup(self):
         # timeout to avoid chrome headless preconnect during tests
         if config['test_enable'] or config['test_file']:
@@ -144,10 +150,38 @@ class RequestHandler(werkzeug.serving.WSGIRequestHandler):
     def send_header(self, keyword, value):
         # Prevent `WSGIRequestHandler` from sending the connection close header (compatibility with werkzeug >= 2.1.1 )
         # since it is incompatible with websocket.
-        if self.headers.get('Upgrade') == 'websocket' and keyword == 'Connection' and value == 'close':
+        headers = self.__dict__.get('headers')
+        if headers and self.headers.get('Upgrade') == 'websocket' and keyword == 'Connection' and value == 'close':
             # Do not keep processing requests.
             self.close_connection = True
             return
+
+        if keyword.casefold() == 'date':
+            if self._sent_date_header is None:
+                self._sent_date_header = value
+            elif self._sent_date_header == value:
+                return  # don't send the same header twice
+            else:
+                sent_datetime = parsedate_to_datetime(self._sent_date_header)
+                new_datetime = parsedate_to_datetime(value)
+                if sent_datetime == new_datetime:
+                    return  # don't send the same date twice (differ in format)
+                if abs((sent_datetime - new_datetime).total_seconds()) <= 1:
+                    return  # don't send the same date twice (jitter of 1 second)
+                _logger.warning(
+                    "sending two different Date response headers: %r vs %r",
+                    self._sent_date_header, value)
+
+        if keyword.casefold() == 'server':
+            if self._sent_server_header is None:
+                self._sent_server_header = value
+            elif self._sent_server_header == value:
+                return  # don't send the same header twice
+            else:
+                _logger.warning(
+                    "sending two different Server response headers: %r vs %r",
+                    self._sent_server_header, value)
+
         super().send_header(keyword, value)
 
     def end_headers(self, *a, **kw):
@@ -156,7 +190,8 @@ class RequestHandler(werkzeug.serving.WSGIRequestHandler):
         # data. In the case of WebSocket connections, data should not be discarded. Replace the
         # rfile/wfile of this handler to prevent any further action (compatibility with werkzeug >= 2.3.x).
         # See: https://github.com/pallets/werkzeug/blob/2.3.x/src/werkzeug/serving.py#L334
-        if self.headers.get('Upgrade') == 'websocket':
+        headers = self.__dict__.get('headers')
+        if headers and self.headers.get('Upgrade') == 'websocket':
             self.rfile = BytesIO()
             self.wfile = BytesIO()
 
@@ -395,6 +430,11 @@ class ThreadedServer(CommonServer):
         # Variable keeping track of the number of calls to the signal handler defined
         # below. This variable is monitored by ``quit_on_signals()``.
         self.quit_signals_received = 0
+        # True only while run()'s signal wait-loop is active. A SIGHUP that
+        # arrives before the loop (start/preload/cron_spawn) or during teardown
+        # must not raise KeyboardInterrupt: that would escape run() and kill the
+        # process (130/129) instead of restarting cleanly.
+        self.running = False
 
         #self.socket = None
         self.httpd = None
@@ -416,9 +456,21 @@ class ThreadedServer(CommonServer):
             sys.stderr.flush()
             os._exit(0)
         elif sig == signal.SIGHUP:
+            if self.quit_signals_received:
+                # A shutdown or phoenix restart is already pending. One file
+                # change can emit several FS events, so a duplicate SIGHUP may
+                # land during the teardown/_reexec path, which runs outside the
+                # wait-loop's try/except; raising there would escape run(). The
+                # pending restart reloads fresh code anyway.
+                return
             # restart on kill -HUP
             odoo.phoenix = True
             self.quit_signals_received += 1
+            if not self.running:
+                # SIGHUP during the startup section, before the wait-loop: don't
+                # raise (it would escape run()). quit_signals_received is now set,
+                # so the loop exits at once when reached and the restart proceeds.
+                return
             # interrupt run() to start shutdown
             raise KeyboardInterrupt()
 
@@ -588,6 +640,11 @@ class ThreadedServer(CommonServer):
 
         odoo.sql_db.close_all()
 
+        current_process = psutil.Process()
+        children = current_process.children(recursive=False)
+        for child in children:
+            _logger.info('A child process was found, pid is %s, process may hang', child)
+
         _logger.debug('--')
         logging.shutdown()
 
@@ -619,6 +676,10 @@ class ThreadedServer(CommonServer):
         # Wait for a first signal to be handled. (time.sleep will be interrupted
         # by the signal handler)
         try:
+            # Arm the SIGHUP-raises-KeyboardInterrupt path only now, from inside
+            # the try that catches it; setting it before the try would leave a
+            # one-statement window where the raise escapes run().
+            self.running = True
             while self.quit_signals_received == 0:
                 self.process_limit()
                 if self.limit_reached_time:
@@ -646,6 +707,8 @@ class ThreadedServer(CommonServer):
                     time.sleep(SLEEP_INTERVAL)
         except KeyboardInterrupt:
             pass
+        finally:
+            self.running = False
 
         self.stop()
 
@@ -759,6 +822,8 @@ class GeventServer(CommonServer):
         gevent.shutdown()
 
     def run(self, preload, stop):
+        if rc := preload_registries(preload):
+            return rc
         self.start()
         self.stop()
 
@@ -875,7 +940,7 @@ class PreforkServer(CommonServer):
 
     def process_zombie(self):
         # reap dead workers
-        while 1:
+        while True:
             try:
                 wpid, status = os.waitpid(-1, os.WNOHANG)
                 if not wpid:
@@ -992,7 +1057,7 @@ class PreforkServer(CommonServer):
         odoo.sql_db.close_all()
 
         _logger.debug("Multiprocess starting")
-        while 1:
+        while True:
             try:
                 #_logger.debug("Multiprocess beat (%s)",time.time())
                 self.process_signals()
@@ -1250,9 +1315,11 @@ class WorkerCron(Worker):
 
     def start(self):
         os.nice(10)     # mommy always told me to be nice with others...
-        Worker.start(self)
+        super().start()
         if self.multi.socket:
             self.multi.socket.close()
+        if registries_size := os.environ.get('ODOO_REGISTRY_LRU_SIZE_CRON'):
+            Registry.registries.count = int(registries_size)
 
         dbconn = odoo.sql_db.db_connect('postgres')
         self.dbcursor = dbconn.cursor()
@@ -1300,6 +1367,13 @@ def _reexec(updated_modules=None):
         args += ["-u", ','.join(updated_modules)]
     if not args or args[0] != exe:
         args.insert(0, exe)
+    if os.name == 'posix':
+        # execve resets caught signal handlers to their default disposition
+        # (SIGHUP terminates -> exit 129) but preserves SIG_IGN, so a SIGHUP that
+        # lands before the re-exec'd process reinstalls its handler would kill it.
+        # The reload loads fresh code, so dropping SIGHUPs across the gap is safe.
+        # Guard on posix: signal.SIGHUP is a shim (-1) on nt and would raise here.
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
     # We should keep the LISTEN_* environment variabled in order to support socket activation on reexec
     os.execve(sys.executable, args, os.environ)
 
@@ -1329,6 +1403,20 @@ def preload_registries(dbnames):
     # TODO: move all config checks to args dont check tools.config here
     dbnames = dbnames or []
     rc = 0
+    registries_size = int(os.environ.get('ODOO_REGISTRY_LRU_SIZE') or 0)
+    if not registries_size and os.name == 'posix':
+        # Size the LRU depending of the memory limits
+        # A registry takes 10MB of memory on average, so we reserve
+        # 10Mb (registry) + 5Mb (working memory) per registry
+        avgsz = 15 * 1024 * 1024
+        limit_memory_soft = config['limit_memory_soft'] if config['limit_memory_soft'] > 0 else (2048 * 1024 * 1024)
+        registries_size = (limit_memory_soft // avgsz) or 1
+    elif not registries_size and len(dbnames) > Registry.registries.count:
+        # If we give a list of databases higher and did not specify the size,
+        # use the number of preloaded databases as the limit.
+        registries_size = len(dbnames)
+    if registries_size:
+        Registry.registries.count = registries_size
     for dbname in dbnames:
         try:
             update_module = config['init'] or config['update']

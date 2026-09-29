@@ -570,7 +570,7 @@ class PosSession(models.Model):
         cash_in_count = 0
         cash_out_count = 0
         cash_in_out_list = []
-        last_session = self.search([('config_id', '=', self.config_id.id), ('id', '!=', self.id)], limit=1)
+        last_session = self.search([('config_id', '=', self.config_id.id), ('id', '<', self.id)], limit=1)
         for cash_move in self.sudo().statement_line_ids.sorted('create_date'):
             if cash_move.amount > 0:
                 cash_in_count += 1
@@ -981,7 +981,7 @@ class PosSession(models.Model):
 
         account_payment = self.env['account.payment'].create({
             'amount': abs(amounts['amount']),
-            'partner_id': payment.partner_id.id,
+            'partner_id': accounting_partner.id,
             'journal_id': payment_method.journal_id.id,
             'force_outstanding_account_id': outstanding_account.id,
             'destination_account_id': destination_account.id,
@@ -1522,9 +1522,8 @@ class PosSession(models.Model):
         message = ""
         if difference:
             message = f"{state} difference: " \
-                      f"{self.currency_id.symbol + ' ' if self.currency_id.position == 'before' else ''}" \
-                      f"{self.currency_id.round(difference)} " \
-                      f"{self.currency_id.symbol if self.currency_id.position == 'after' else ''}" + Markup('<br/>')
+                      f"{self.currency_id.format(difference) }" \
+                          + Markup('<br/>')
         if notes:
             message += escape(notes).replace('\n', Markup('<br/>'))
         if message:
@@ -1678,7 +1677,7 @@ class PosSession(models.Model):
             # - values: list of tax ids
             key_company_id = itemgetter('company_id')
             key_id = itemgetter('id')
-            for key, group in groupby(loaded_data['account.tax'], key=key_company_id):
+            for key, group in groupby(sorted(loaded_data['account.tax'], key=key_company_id), key=key_company_id):
                 taxes_by_company[key[0]] = list(map(key_id, group))
         if len(taxes_by_company) > 1:
             for product in loaded_data['product.product']:

@@ -58,10 +58,6 @@ class StockMove(models.Model):
             move.show_details_visible = True
         return res
 
-    def _compute_picked(self):
-       subcontracted_moves = self.filtered(lambda m: m.is_subcontract)
-       super(StockMove, self - subcontracted_moves)._compute_picked()
-
     def _set_quantity_done(self, qty):
         to_set_moves = self
         for move in self:
@@ -108,7 +104,7 @@ class StockMove(models.Model):
                 production.qty_producing = 1
                 if not production.lot_producing_id:
                     production.action_generate_serial()
-                production.with_context(cancel_backorder=False).subcontracting_record_component()
+                production.with_context(cancel_backorder=False, skip_consumption=True).subcontracting_record_component()
         else:
             production.qty_producing = qty
             if float_compare(production.qty_producing, production.product_qty, precision_rounding=production.product_uom_id.rounding) > 0:
@@ -119,7 +115,7 @@ class StockMove(models.Model):
             if production.product_tracking == 'lot' and not production.lot_producing_id:
                 production.action_generate_serial()
             production._set_qty_producing()
-            production.with_context(cancel_backorder=False).subcontracting_record_component()
+            production.with_context(cancel_backorder=False, skip_consumption=True).subcontracting_record_component()
 
     def copy(self, default=None):
         self.ensure_one()
@@ -323,7 +319,12 @@ class StockMove(models.Model):
 
         # Cancel productions until reach new_quantity
         for production in (productions - wip_production):
-            if quantity_to_remove >= production.product_qty:
+            if float_compare(quantity_to_remove, production.product_qty, precision_rounding=production.product_uom_id.rounding) >= 0:
+                if len(productions + wip_production) == 1:
+                    production.qty_producing = 0
+                    production.subcontracting_has_been_recorded = False
+                    production._set_qty_producing()
+                    break  # Never cancel the last MO if there's still a subcontracting move
                 quantity_to_remove -= production.product_qty
                 production.with_context(skip_activity=True).action_cancel()
             else:
@@ -338,7 +339,7 @@ class StockMove(models.Model):
 
     def _check_access_if_subcontractor(self, vals):
         if self.env.user.has_group('base.group_portal') and not self.env.su:
-            if vals.get('state') == 'done':
+            if vals.get('state') == 'done' or self.env.context.get('default_state') == 'done':
                 raise AccessError(_("Portal users cannot create a stock move with a state 'Done' or change the current state to 'Done'."))
 
     def _is_subcontract_return(self):

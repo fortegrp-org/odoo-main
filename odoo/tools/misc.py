@@ -5,14 +5,17 @@
 """
 Miscellaneous tools used by OpenERP.
 """
+import base64
 import cProfile
 import collections
 import contextlib
 import datetime
+import functools
 import hmac as hmac_lib
 import hashlib
 import io
 import itertools
+import json
 import logging
 import os
 import pickle as pickle_
@@ -28,12 +31,13 @@ import types
 import unicodedata
 import warnings
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping, MutableMapping, MutableSet
+from collections.abc import Iterable, Mapping, MutableMapping, MutableSet, Sequence
 from contextlib import ContextDecorator, contextmanager
 from difflib import HtmlDiff
 from functools import reduce, wraps
 from itertools import islice, groupby as itergroupby
 from operator import itemgetter
+from typing import Literal
 
 import babel
 import babel.dates
@@ -41,6 +45,7 @@ import markupsafe
 import passlib.utils
 import pytz
 import werkzeug.utils
+from babel import lists
 from lxml import etree, objectify
 
 import odoo
@@ -855,8 +860,8 @@ class lower_logging(logging.Handler):
         if record.levelno > self.max_level:
             record.levelname = f'_{record.levelname}'
             record.levelno = self.to_level
+            record.munge_traceback = True
             self.had_error_log = True
-            record.args = tuple(arg.replace('Traceback (most recent call last):', '_Traceback_ (most recent call last):') if isinstance(arg, str) else arg for arg in record.args)
 
         if logging.getLogger(record.name).isEnabledFor(record.levelno):
             for handler in self.old_handlers:
@@ -1151,12 +1156,22 @@ class OrderedSet(MutableSet):
     def intersection(self, *others):
         return reduce(OrderedSet.__and__, others, self)
 
+    def copy(self):
+        new_set = OrderedSet()
+        new_set._map = self._map.copy()  # Atomic dict copy
+        return new_set
+
 
 class LastOrderedSet(OrderedSet):
     """ A set collection that remembers the elements last insertion order. """
     def add(self, elem):
         OrderedSet.discard(self, elem)
         OrderedSet.add(self, elem)
+
+    def copy(self):
+        new_set = LastOrderedSet()
+        new_set._map = self._map.copy()  # Atomic dict copy
+        return new_set
 
 
 class Callbacks:
@@ -1371,6 +1386,8 @@ def get_lang(env, lang_code=False):
         lang = env.user.company_id.partner_id.lang
     return env['res.lang']._lang_get(lang)
 
+
+@functools.lru_cache
 def babel_locale_parse(lang_code):
     try:
         return babel.Locale.parse(lang_code)
@@ -1379,6 +1396,56 @@ def babel_locale_parse(lang_code):
             return babel.Locale.default()
         except:
             return babel.Locale.parse("en_US")
+
+
+def format_list(
+    env,
+    lst: Sequence[str],
+    style: Literal["standard", "standard-short", "or", "or-short", "unit", "unit-short", "unit-narrow"] = "standard",
+    lang_code: str | None = None,
+) -> str:
+    """
+    Format the items in `lst` as a list in a locale-dependent manner with the chosen style.
+
+    The available styles are defined by babel according to the Unicode TR35-49 spec:
+    * standard:
+      A typical 'and' list for arbitrary placeholders.
+      e.g. "January, February, and March"
+    * standard-short:
+      A short version of an 'and' list, suitable for use with short or abbreviated placeholder values.
+      e.g. "Jan., Feb., and Mar."
+    * or:
+      A typical 'or' list for arbitrary placeholders.
+      e.g. "January, February, or March"
+    * or-short:
+      A short version of an 'or' list.
+      e.g. "Jan., Feb., or Mar."
+    * unit:
+      A list suitable for wide units.
+      e.g. "3 feet, 7 inches"
+    * unit-short:
+      A list suitable for short units
+      e.g. "3 ft, 7 in"
+    * unit-narrow:
+      A list suitable for narrow units, where space on the screen is very limited.
+      e.g. "3′ 7″"
+
+    See https://www.unicode.org/reports/tr35/tr35-49/tr35-general.html#ListPatterns for more details.
+
+    :param env: the current environment.
+    :param lst: the sequence of items to format into a list.
+    :param style: the style to format the list with.
+    :param lang_code: the locale (i.e. en_US).
+    :return: the formatted list.
+    """  # noqa: RUF002
+    locale = babel_locale_parse(lang_code or get_lang(env).code)
+    # Some styles could be unavailable for the chosen locale
+    if style not in locale.list_patterns:
+        style = "standard"
+    try:
+        return lists.format_list(lst, style, locale)
+    except KeyError:
+        return lists.format_list(lst, 'standard', locale)
 
 def formatLang(env, value, digits=2, grouping=True, monetary=False, dp=None, currency_obj=None, rounding_method='HALF-EVEN', rounding_unit='decimals'):
     """
@@ -1755,7 +1822,7 @@ def get_diff(data_from, data_to, custom_style=False, dark_color_scheme=False):
         For the table to fit the modal width, some custom style is needed.
         """
         to_append = {
-            'diff_header': 'bg-600 text-center align-top px-2',
+            'diff_header': 'bg-600 text-light text-center align-top px-2',
             'diff_next': 'd-none',
         }
         for old, new in to_append.items():
@@ -1797,7 +1864,7 @@ def get_diff(data_from, data_to, custom_style=False, dark_color_scheme=False):
     return handle_style(diff, custom_style, dark_color_scheme)
 
 
-def hmac(env, scope, message, hash_function=hashlib.sha256):
+def hmac(env, scope, message, hash_function=hashlib.sha256, *, secret=None):
     """Compute HMAC with `database.secret` config parameter as key.
 
     :param env: sudo environment to use for retrieving config parameter
@@ -1805,17 +1872,81 @@ def hmac(env, scope, message, hash_function=hashlib.sha256):
     :param scope: scope of the authentication, to have different signature for the same
         message in different usage
     :param hash_function: hash function to use for HMAC (default: SHA-256)
+    :param secret: secret used for sign, falls back to database.secret when no explicit secret is provided
     """
     if not scope:
         raise ValueError('Non-empty scope required')
 
-    secret = env['ir.config_parameter'].get_param('database.secret')
+    if secret is None:
+        secret = env['ir.config_parameter'].get_param('database.secret')
+    if isinstance(secret, str):
+        secret = secret.encode()
+
+    if not isinstance(secret, bytes):
+        raise TypeError("secret must be a str or bytes")
+    if not secret:
+        raise ValueError("Non-empty secret required")
+
     message = repr((scope, message))
     return hmac_lib.new(
-        secret.encode(),
+        secret,
         message.encode(),
         hash_function,
     ).hexdigest()
+
+
+def hash_sign(env, scope, message_values, expiration=None, expiration_hours=None, *, secret=None):
+    """ Generate an urlsafe payload signed with the HMAC signature for an iterable set of data.
+    This feature is very similar to JWT, but in a more generic implementation that is inline with out previous hmac implementation.
+
+    :param env: sudo environment to use for retrieving config parameter
+    :param scope: scope of the authentication, to have different signature for the same
+        message in different usage
+    :param message_values: values to be encoded inside the payload
+    :param expiration: optional, a datetime or timedelta
+    :param expiration_hours: optional, a int representing a number of hours before expiration. Cannot be set at the same time as expiration
+    :param secret: secret used for sign, falls back to database.secret when no explicit secret is provided
+    :return: the payload that can be used as a token
+    """
+    assert not (expiration and expiration_hours)
+    assert message_values is not None
+
+    if expiration_hours:
+        expiration = datetime.datetime.now() + datetime.timedelta(hours=expiration_hours)
+    else:
+        if isinstance(expiration, datetime.timedelta):
+            expiration = datetime.datetime.now() + expiration
+    expiration_timestamp = 0 if not expiration else int(expiration.timestamp())
+    message_strings = json.dumps(message_values)
+    hash_value = hmac(env, scope, f'1:{message_strings}:{expiration_timestamp}', hash_function=hashlib.sha256, secret=secret)
+    token = b"\x01" + expiration_timestamp.to_bytes(8, 'little') + bytes.fromhex(hash_value) + message_strings.encode()
+    return base64.urlsafe_b64encode(token).decode().rstrip('=')
+
+
+def verify_hash_signed(env, scope, payload, *, secret=None):
+    """ Verify and extract data from a given urlsafe  payload generated with hash_sign()
+
+    :param env: sudo environment to use for retrieving config parameter
+    :param scope: scope of the authentication, to have different signature for the same
+        message in different usage
+    :param payload: the token to verify
+    :param secret: secret used to verify signature, falls back to database.secret when no explicit secret is provided
+    :return: The payload_values if the check was successful, None otherwise.
+    """
+
+    token = base64.urlsafe_b64decode(payload.encode() + b'===')
+    version = token[:1]
+    if version != b'\x01':
+        raise ValueError('Unknown token version')
+
+    expiration_value, hash_value, message = token[1:9], token[9:41].hex(), token[41:].decode()
+    expiration_value = int.from_bytes(expiration_value, byteorder='little')
+    hash_value_expected = hmac(env, scope, f'1:{message}:{expiration_value}', hash_function=hashlib.sha256, secret=secret)
+
+    if consteq(hash_value, hash_value_expected) and (expiration_value == 0 or datetime.datetime.now().timestamp() < expiration_value):
+        message_values = json.loads(message)
+        return message_values
+    return None
 
 
 ADDRESS_REGEX = re.compile(r'^(.*?)(\s[0-9][0-9\S]*)?(?: - (.+))?$', flags=re.DOTALL)

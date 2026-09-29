@@ -6,7 +6,7 @@
             <div t-attf-class="position-absolute d-flex justify-content-between w-100 bottom-0 opacity-0 opacity-100-hover {{isMobile ? 'o_mobile_controls' : ''}}" aria-atomic="true" t-att-style="sizeStyle">
                 <t t-if="!props.readonly">
                     <FileUploader
-                        acceptedFileExtensions="props.acceptedFileExtensions"
+                        acceptedFileExtensions="this.acceptedFileExtensions"
                         t-key="props.record.resId"
                         onUploaded.bind="onFileUploaded"
                     >

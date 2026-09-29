@@ -392,7 +392,8 @@ class WebsiteSale(payment_portal.PaymentPortal):
         if filter_by_price_enabled:
             # TODO Find an alternative way to obtain the domain through the search metadata.
             Product = request.env['product.template'].with_context(bin_size=True)
-            domain = self._get_shop_domain(search, category, attrib_values)
+            search_term = fuzzy_search_term if fuzzy_search_term else search
+            domain = self._get_shop_domain(search_term, category, attrib_values)
 
             # This is ~4 times more efficient than a search for the cheapest and most expensive products
             query = Product._where_calc(domain)
@@ -424,7 +425,12 @@ class WebsiteSale(payment_portal.PaymentPortal):
         if filter_by_tags_enabled and search_product:
             all_tags = ProductTag.search(
                 expression.AND([
-                    [('product_ids.is_published', '=', True), ('visible_on_ecommerce', '=', True)],
+                    [
+                        ('visible_on_ecommerce', '=', True),
+                        '|',
+                        ('product_template_ids.is_published', '=', True),
+                        ('product_product_ids.is_published', '=', True),
+                    ],
                     website_domain
                 ])
             )
@@ -451,12 +457,16 @@ class WebsiteSale(payment_portal.PaymentPortal):
         ProductAttribute = request.env['product.attribute']
         if products:
             # get all products without limit
-            attributes = lazy(lambda: ProductAttribute.search([
-                ('product_tmpl_ids', 'in', search_product.ids),
-                ('visibility', '=', 'visible'),
-            ]))
-        else:
-            attributes = lazy(lambda: ProductAttribute.browse(attributes_ids))
+            attributes_grouped = request.env['product.template.attribute.line']._read_group(
+                domain=[
+                    ('product_tmpl_id', 'in', search_product.ids),
+                    ('attribute_id.visibility', '=', 'visible'),
+                ],
+                groupby=['attribute_id']
+            )
+
+            attributes_ids = [attribute.id for attribute, *aggregates in attributes_grouped]
+        attributes = lazy(lambda: ProductAttribute.browse(attributes_ids))
 
         layout_mode = request.session.get('website_sale_shop_layout_mode')
         if not layout_mode:
@@ -1343,7 +1353,11 @@ class WebsiteSale(payment_portal.PaymentPortal):
 
                     if address_mode == 'billing':
                         update_values['partner_invoice_id'] = partner_id
-                        if kw.get('use_same'):
+                        if (
+                            kw.get('use_same') or
+                            # Shipping is disabled in settings; always use billing as shipping
+                            not request.env.user.has_group('account.group_delivery_invoice_address')
+                        ):
                             update_values['partner_shipping_id'] = partner_id
                         elif (
                             order._is_public_order()
@@ -1428,6 +1442,7 @@ class WebsiteSale(payment_portal.PaymentPortal):
         # Update the partner with all the information
         self._include_country_and_state_in_address(billing_address)
         if order_sudo.partner_id == public_partner:
+            fpos_before = order_sudo.fiscal_position_id
             billing_partner_id = self._create_or_edit_partner(billing_address, type='invoice')
             order_sudo.partner_id = billing_partner_id
             # Pricelist are recomputed every time the partner is changed. We don't want to recompute
@@ -1437,6 +1452,19 @@ class WebsiteSale(payment_portal.PaymentPortal):
                 order_sudo.env['sale.order']._fields['pricelist_id'], order_sudo
             )
             order_sudo.message_partner_ids = request.env['res.partner'].browse(billing_partner_id)
+            if order_sudo.fiscal_position_id != fpos_before:
+                # The customer approved a total in the express payment sheet for the previous fiscal
+                # position; recompute the taxes and abort rather than silently charge a different
+                # amount. The JS reloads the page so the updated prices are re-accepted.
+                try:
+                    order_sudo.with_context(is_express_checkout_flow=True)._recompute_taxes()
+                except UserError:
+                    pass  # Don't block the flow if the external tax computation (e.g. Avatax) fails.
+                order_sudo.shop_warning = _(
+                    "Taxes have been updated based on your address."
+                    " Your payment method has not been charged."
+                )
+                return False
         elif any(billing_address[k] != order_sudo.partner_invoice_id[k] for k in billing_address):
             # Check if a child partner doesn't already exist with the same informations. The
             # phone isn't always checked because it isn't sent in shipping information with
@@ -1457,7 +1485,7 @@ class WebsiteSale(payment_portal.PaymentPortal):
             #in order to not override shippig address, it's checked separately from shipping option
             self._include_country_and_state_in_address(shipping_address)
 
-            if order_sudo.partner_shipping_id.name.endswith(order_sudo.name):
+            if order_sudo.name in order_sudo.partner_shipping_id.name:
                 # The existing partner was created by `process_express_checkout_delivery_choice`, it
                 # means that the partner is missing information, so we update it.
                 order_sudo.partner_shipping_id = self._create_or_edit_partner(
@@ -1770,6 +1798,23 @@ class WebsiteSale(payment_portal.PaymentPortal):
 
         return values
 
+    @http.route(
+        _express_checkout_shipping_route + '/compute_taxes', type='json', auth='public',
+        website=True, sitemap=False,
+    )
+    def express_checkout_shipping_address_compute_taxes(self):
+        order_sudo = request.website.sale_get_order()
+        try:
+            order_sudo.with_context(is_express_checkout_flow=True)._recompute_taxes()
+        except UserError:
+            return {'external_tax_error': True}
+
+        amount_without_delivery = order_sudo._compute_amount_total_without_delivery()
+
+        return payment_utils.to_minor_currency_units(
+            amount_without_delivery, order_sudo.currency_id
+        )
+
     def _get_shop_payment_errors(self, order):
         """ Check that there is no error that should block the payment.
 
@@ -1858,6 +1903,7 @@ class WebsiteSale(payment_portal.PaymentPortal):
 
         if order and not order.amount_total and not tx_sudo:
             if order.state != 'sale':
+                order._check_cart_is_ready_to_be_paid()
                 order.with_context(send_email=True).with_user(SUPERUSER_ID).action_confirm()
             request.website.sale_reset()
             return request.redirect(order.get_portal_url())
@@ -2076,6 +2122,8 @@ class PaymentPortal(payment_portal.PaymentPortal):
         if compare_amounts(order_sudo.amount_paid, order_sudo.amount_total) == 0:
             raise UserError(_("The cart has already been paid. Please refresh the page."))
 
+        if delay_payment_request := kwargs.get('flow') == 'token':
+            request.update_context(delay_payment_request=True)  # wait until after tx validation
         tx_sudo = self._create_transaction(
             custom_create_values={'sale_order_ids': [Command.set([order_id])]}, **kwargs,
         )
@@ -2085,6 +2133,8 @@ class PaymentPortal(payment_portal.PaymentPortal):
         request.session['__website_sale_last_tx_id'] = tx_sudo.id
 
         self._validate_transaction_for_order(tx_sudo, order_id)
+        if delay_payment_request:
+            tx_sudo._send_payment_request()
 
         return tx_sudo._get_processing_values()
 
@@ -2100,7 +2150,12 @@ class CustomerPortal(sale_portal.CustomerPortal):
         :return: The payment-specific values.
         :rtype: dict
         """
-        website_id = website_id or order_sudo.website_id.id
+        if not website_id:
+            if order_sudo.website_id:
+                website_id = order_sudo.website_id.id
+            elif request.website:
+                website_id = request.website.id
+
         return super()._get_payment_values(order_sudo, website_id=website_id, **kwargs)
 
     def _sale_reorder_get_line_context(self):
@@ -2109,7 +2164,9 @@ class CustomerPortal(sale_portal.CustomerPortal):
     @http.route('/my/orders/reorder_modal_content', type='json', auth='public', website=True)
     def my_orders_reorder_modal_content(self, order_id, access_token):
         try:
-            sale_order = self._document_check_access('sale.order', order_id, access_token=access_token)
+            sale_order = self._document_check_access(
+                'sale.order', order_id, access_token=access_token,
+            ).with_user(request.env.user).sudo()
         except (AccessError, MissingError):
             return request.redirect('/my')
 

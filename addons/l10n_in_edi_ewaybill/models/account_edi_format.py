@@ -28,7 +28,7 @@ class AccountEdiFormat(models.Model):
             1. base on IRN, IRN is number created when we do E-invoice
             2. direct call, when E-invoice not aplicable or it"s credit not
         """
-        if move.move_type == "out_refund":
+        if move.move_type == "out_refund" or move._get_debit_note_origin():
             return "direct"
         einvoice_in_edi_format = move.journal_id.edi_format_ids.filtered(lambda f: f.code == "in_einvoice_1_03")
         return einvoice_in_edi_format and einvoice_in_edi_format._get_move_applicability(move) and "irn" or "direct"
@@ -96,6 +96,9 @@ class AccountEdiFormat(models.Model):
         elif move.l10n_in_mode in ("2", "3", "4"):
             if not move.l10n_in_transportation_doc_no and move.l10n_in_transportation_doc_date:
                 error_message.append(_("- Transport document number and date is required when Transportation Mode is Rail,Air or Ship"))
+        buyer_seller_partners = self._get_l10n_in_edi_saler_buyer_party(move)
+        if buyer_seller_partners['ship_to_details'].zip == buyer_seller_partners['dispatch_details'].zip and not move.l10n_in_distance:
+            error_message.append(_("- Set a valid distance when the dispatch and delivery pincodes are the same."))
         if error_message:
             error_message.insert(0, _("The following information are missing on the invoice (see eWayBill tab):"))
         goods_lines = move.invoice_line_ids.filtered(lambda line: not (line.display_type in ('line_section', 'line_note', 'rounding') or line.product_id.type == "service"))
@@ -134,7 +137,7 @@ class AccountEdiFormat(models.Model):
         cancel_json = {
             "ewbNo": ewaybill_response_json.get("ewayBillNo") or ewaybill_response_json.get("EwbNo"),
             "cancelRsnCode": int(invoices.l10n_in_edi_cancel_reason),
-            "CnlRem": invoices.l10n_in_edi_cancel_remarks,
+            "cancelRmrk": invoices.l10n_in_edi_cancel_remarks,
         }
         response = self._l10n_in_edi_ewaybill_cancel(invoices.company_id, cancel_json)
         if response.get("error"):
@@ -290,6 +293,12 @@ class AccountEdiFormat(models.Model):
                 "TransMode": invoice.l10n_in_mode,
                 "VehNo": invoice.l10n_in_vehicle_no,
                 "VehType": invoice.l10n_in_vehicle_type,
+                **{
+                    k: v for k, v in {
+                        "TransId": invoice.l10n_in_transporter_id.vat,
+                        "TransName": invoice.l10n_in_transporter_id.name,
+                    }.items() if v
+                },
             })
         elif invoice.l10n_in_mode in ("2", "3", "4"):
             doc_date = invoice.l10n_in_transportation_doc_date
@@ -504,6 +513,12 @@ class AccountEdiFormat(models.Model):
                 "transMode": invoices.l10n_in_mode,
                 "vehicleNo": invoices.l10n_in_vehicle_no or "",
                 "vehicleType": invoices.l10n_in_vehicle_type or "",
+                **{
+                    k: v for k, v in {
+                        "transporterId": invoices.l10n_in_transporter_id.vat,
+                        "transporterName": invoices.l10n_in_transporter_id.name,
+                    }.items() if v
+                },
             })
         return json_payload
 
@@ -511,11 +526,11 @@ class AccountEdiFormat(models.Model):
         extract_digits = self._l10n_in_edi_extract_digits
         tax_details_by_code = self._get_l10n_in_tax_details_by_line_code(line_tax_details.get("tax_details", {}))
         line_details = {
-            "productName": line.product_id.name,
+            "productName": line.product_id.name[:100] if line.product_id else "",
             "hsnCode": extract_digits(line.product_id.l10n_in_hsn_code),
-            "productDesc": line.name,
+            "productDesc": line.name[:100] if line.name else "",
             "quantity": line.quantity,
-            "qtyUnit": line.product_id.uom_id.l10n_in_code and line.product_id.uom_id.l10n_in_code.split("-")[0] or "OTH",
+            "qtyUnit": line.product_uom_id.l10n_in_code and line.product_uom_id.l10n_in_code.split("-")[0] or "OTH",
             "taxableAmount": self._l10n_in_round_value(line.balance * sign),
         }
         gst_types = {'cgst', 'sgst', 'igst'}
@@ -593,17 +608,21 @@ class AccountEdiFormat(models.Model):
     @api.model
     def _l10n_in_edi_ewaybill_connect_to_server(self, company, url_path, params):
         user_token = self.env["iap.account"].get("l10n_in_edi")
+        IrConfigParam = self.env["ir.config_parameter"].sudo()
         params.update({
             "account_token": user_token.account_token,
-            "dbuuid": self.env["ir.config_parameter"].sudo().get_param("database.uuid"),
+            "dbuuid": IrConfigParam.get_param("database.uuid"),
             "username": company.sudo().l10n_in_edi_ewaybill_username,
             "gstin": company.vat,
         })
+        gsp_provider = IrConfigParam.get_param("l10n_in.gsp_provider")
+        if gsp_provider:
+            params["gsp_provider"] = gsp_provider
         if company.sudo().l10n_in_edi_production_env:
             default_endpoint = DEFAULT_IAP_ENDPOINT
         else:
             default_endpoint = DEFAULT_IAP_TEST_ENDPOINT
-        endpoint = self.env["ir.config_parameter"].sudo().get_param("l10n_in_edi_ewaybill.endpoint", default_endpoint)
+        endpoint = IrConfigParam.get_param("l10n_in_edi_ewaybill.endpoint", default_endpoint)
         url = "%s%s" % (endpoint, url_path)
         try:
             response = jsonrpc(url, params=params, timeout=70)

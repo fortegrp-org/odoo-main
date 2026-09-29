@@ -49,6 +49,13 @@ class IrModuleModule(models.Model):
         for module in self:
             module.is_installed_on_current_website = module == self.env['website'].get_current_website().theme_id
 
+    def _button_immediate_function(self, func):
+        website = request.env['website'].get_current_website() if request else self.env['website']
+        self.env['ir.config_parameter'].sudo().set_param('website.apply_new_theme', website.id if request else False)
+        res = super()._button_immediate_function(func)
+        self.env['ir.config_parameter'].sudo().set_param('website.apply_new_theme', False)
+        return res
+
     def write(self, vals):
         """
             Override to correctly upgrade themes after upgrade/installation of modules.
@@ -76,20 +83,17 @@ class IrModuleModule(models.Model):
 
                     -> We want to upgrade every website using this theme.
         """
-        if request and request.db and request.env and request.context.get('apply_new_theme'):
-            self = self.with_context(apply_new_theme=True)
-
         for module in self:
             if module.name.startswith('theme_') and vals.get('state') == 'installed':
                 _logger.info('Module %s has been loaded as theme template (%s)' % (module.name, module.state))
 
                 if module.state in ['to install', 'to upgrade']:
                     websites_to_update = module._theme_get_stream_website_ids()
-
-                    if module.state == 'to upgrade' and request:
-                        Website = self.env['website']
-                        current_website = Website.get_current_website()
-                        websites_to_update = current_website if current_website in websites_to_update else Website
+                    if module.state == 'to upgrade' and (website_restriction := int(self.env['ir.config_parameter'].sudo().get_param('website.apply_new_theme', 0))):
+                        if website_restriction in websites_to_update.ids:
+                            websites_to_update = websites_to_update.browse(website_restriction)
+                        else:
+                            websites_to_update = websites_to_update.browse()
 
                     for website in websites_to_update:
                         module._theme_load(website)
@@ -239,14 +243,9 @@ class IrModuleModule(models.Model):
             for model_name in self._theme_model_names:
                 module._update_records(model_name, website)
 
-            if self._context.get('apply_new_theme'):
-                # Both the theme install and upgrade flow ends up here.
-                # The _post_copy() is supposed to be called only when the theme
-                # is installed for the first time on a website.
-                # It will basically select some header and footer template.
-                # We don't want the system to select again the theme footer or
-                # header template when that theme is updated later. It could
-                # erase the change the user made after the theme install.
+            if self.env.context.get('apply_new_theme'):
+                # TODO Kept for backward compatibility with design-themes tests
+                # and web_studio. This could become a parameter in master.
                 self.env['theme.utils'].with_context(website_id=website.id)._post_copy(module)
 
     def _theme_unload(self, website):
@@ -401,9 +400,8 @@ class IrModuleModule(models.Model):
         website.theme_id = self
 
         # this will install 'self' if it is not installed yet
-        if request:
-            request.update_context(apply_new_theme=True)
         self._theme_upgrade_upstream()
+        self.env['theme.utils'].with_context(website_id=website.id)._post_copy(self)
 
         result = website.button_go_website()
         result['context']['params']['with_loader'] = True
@@ -499,38 +497,39 @@ class IrModuleModule(models.Model):
         cache = self.env.cache
         View = self.env['ir.ui.view']
         field = self.env['ir.ui.view']._fields['arch_db']
-        # assume there are not too many records
+        batch_size = models.PREFETCH_MAX // 10
         self.env.cr.execute(""" SELECT generic.arch_db, specific.arch_db, specific.id
-                          FROM ir_ui_view generic
-                         INNER JOIN ir_ui_view specific
-                            ON generic.key = specific.key
-                         WHERE generic.website_id IS NULL AND generic.type = 'qweb'
-                         AND specific.website_id IS NOT NULL
-            """)
-        for generic_arch_db, specific_arch_db, specific_id in self.env.cr.fetchall():
-            if not generic_arch_db:
-                continue
-            langs_update = (langs & generic_arch_db.keys()) - {'en_US'}
-            if not langs_update:
-                continue
-            # get dictionaries limited to the requested languages
-            generic_arch_db_en = generic_arch_db.get('en_US')
-            specific_arch_db_en = specific_arch_db.get('en_US')
-            generic_arch_db_update = {k: generic_arch_db[k] for k in langs_update}
-            specific_arch_db_update = {k: specific_arch_db.get(k, specific_arch_db_en) for k in langs_update}
-            generic_translation_dictionary = field.get_translation_dictionary(generic_arch_db_en, generic_arch_db_update)
-            specific_translation_dictionary = field.get_translation_dictionary(specific_arch_db_en, specific_arch_db_update)
-            # update specific_translation_dictionary
-            for term_en, specific_term_langs in specific_translation_dictionary.items():
-                if term_en not in generic_translation_dictionary:
+                                          FROM ir_ui_view generic
+                                         INNER JOIN ir_ui_view specific
+                                            ON generic.key = specific.key
+                                         WHERE generic.website_id IS NULL AND generic.type = 'qweb'
+                                         AND specific.website_id IS NOT NULL
+                                         AND generic.arch_db IS NOT NULL
+                                         AND specific.arch_db IS NOT NULL
+                            """)
+        while batch := self.env.cr.fetchmany(batch_size):
+            for generic_arch_db, specific_arch_db, specific_id in batch:
+                langs_update = (langs & generic_arch_db.keys()) - {'en_US'}
+                if not langs_update:
                     continue
-                for lang, generic_term_lang in generic_translation_dictionary[term_en].items():
-                    if overwrite or term_en == specific_term_langs[lang]:
-                        specific_term_langs[lang] = generic_term_lang
-            for lang in langs_update:
-                specific_arch_db[lang] = field.translate(
-                    lambda term: specific_translation_dictionary.get(term, {lang: None})[lang], specific_arch_db_en)
-            cache.update_raw(View.browse(specific_id), field, [specific_arch_db], dirty=True)
+                # get dictionaries limited to the requested languages
+                generic_arch_db_en = generic_arch_db.get('en_US')
+                specific_arch_db_en = specific_arch_db.get('en_US')
+                generic_arch_db_update = {k: generic_arch_db[k] for k in langs_update}
+                specific_arch_db_update = {k: specific_arch_db.get(k, specific_arch_db_en) for k in langs_update}
+                generic_translation_dictionary = field.get_translation_dictionary(generic_arch_db_en, generic_arch_db_update)
+                specific_translation_dictionary = field.get_translation_dictionary(specific_arch_db_en, specific_arch_db_update)
+                # update specific_translation_dictionary
+                for term_en, specific_term_langs in specific_translation_dictionary.items():
+                    if term_en not in generic_translation_dictionary:
+                        continue
+                    for lang, generic_term_lang in generic_translation_dictionary[term_en].items():
+                        if overwrite or term_en == specific_term_langs[lang]:
+                            specific_term_langs[lang] = generic_term_lang
+                for lang in langs_update:
+                    specific_arch_db[lang] = field.translate(
+                        lambda term: specific_translation_dictionary.get(term, {lang: None})[lang], specific_arch_db_en)
+                cache.update_raw(View.browse(specific_id), field, [specific_arch_db], dirty=True)
 
         default_menu = self.env.ref('website.main_menu', raise_if_not_found=False)
         if not default_menu:

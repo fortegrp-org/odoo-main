@@ -10,7 +10,7 @@ from psycopg2 import sql, DatabaseError
 from odoo import api, fields, models, _
 from odoo.osv import expression
 from odoo.tools import DEFAULT_SERVER_DATETIME_FORMAT, mute_logger
-from odoo.exceptions import ValidationError, UserError
+from odoo.exceptions import AccessError, ValidationError, UserError
 from odoo.addons.base.models.res_partner import WARNING_MESSAGE, WARNING_HELP
 
 _logger = logging.getLogger(__name__)
@@ -278,6 +278,8 @@ class AccountFiscalPosition(models.Model):
         return fp or self.env['account.fiscal.position']
 
     def action_create_foreign_taxes(self):
+        if not (self.env.is_admin() or self.env.user.has_group('account.group_account_manager')):
+            raise AccessError(_("Only Accounting managers can create foreign taxes."))
         self.ensure_one()
         template_code = self.env['account.chart.template']._guess_chart_template(self.country_id)
         template = self.env['account.chart.template']._get_chart_template_mapping()[template_code]
@@ -609,6 +611,7 @@ class ResPartner(models.Model):
     duplicated_bank_account_partners_count = fields.Integer(
         compute='_compute_duplicated_bank_account_partners_count',
     )
+    # DEPRECATED, DO NOT USE, TO BE REMOVED IN MASTER
     is_coa_installed = fields.Boolean(store=False, default=lambda partner: bool(partner.env.company.chart_template))
 
     def _compute_bank_count(self):
@@ -803,7 +806,7 @@ class ResPartner(models.Model):
                  against the provided or guessed country. None if no country was available
                  for the check, and no conclusion could be made with certainty.
         """
-        return default_country.code.lower()
+        return default_country.code.lower() if default_country else None
 
     @api.model
     def _build_vat_error_message(self, country_code, wrong_vat, record_label):
@@ -838,8 +841,8 @@ class ResPartner(models.Model):
         if not vat:
             return None
 
-        # Sometimes, the vat is specified with some whitespaces.
-        normalized_vat = vat.replace(' ', '')
+        # Sometimes, the vat is specified with some whitespaces or dots.
+        normalized_vat = vat.replace(' ', '').replace('.', '')
         country_prefix = re.match('^[a-zA-Z]{2}|^', vat).group()
 
         partner = self.env['res.partner'].search(extra_domain + [('vat', 'in', (normalized_vat, vat))], limit=2)
@@ -902,7 +905,7 @@ class ResPartner(models.Model):
     def _retrieve_partner_with_name(self, name, extra_domain):
         if not name:
             return None
-        return self.env['res.partner'].search([('name', 'ilike', name)] + extra_domain, limit=2)
+        return self.env['res.partner'].search([('name', '=ilike', name)] + extra_domain, limit=1)
 
     def _retrieve_partner(self, name=None, phone=None, mail=None, vat=None, domain=None, company=None):
         '''Search all partners and find one that matches one of the parameters.

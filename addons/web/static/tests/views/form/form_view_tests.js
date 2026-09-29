@@ -461,6 +461,19 @@ QUnit.module("Views", (hooks) => {
         }
     });
 
+    QUnit.test("button box rendering invisible", async (assert) => {
+        await makeView({
+            type: "form",
+            resModel: "partner",
+            serverData,
+            arch: `<form><div name="button_box" invisible="1"><button id="btn1">MyButton</button></div></form>`,
+            resId: 2,
+        });
+        const panelActions = target.querySelector(".o_control_panel .o_control_panel_actions");
+        assert.strictEqual(panelActions.childElementCount, 0);
+        assert.strictEqual(panelActions.textContent, "");
+    });
+
     QUnit.test("form view gets size class on small and big screens", async (assert) => {
         let uiSize = SIZES.MD;
         const bus = new EventBus();
@@ -4494,6 +4507,37 @@ QUnit.module("Views", (hooks) => {
         assert.strictEqual(
             target.querySelector(".o_control_panel .o_breadcrumb").textContent,
             "New",
+            "should have the display name of the record as title"
+        );
+    });
+
+    QUnit.test("form view properly format the title", async function (assert) {
+        serverData.views = {
+            "partner,false,form": '<form><field name="foo"/></form>',
+            "partner,false,search": "<search/>",
+        };
+
+        serverData.models.partner.records[0].display_name =
+            "first record\naddress of the first record\ncountry of the first record";
+
+        serverData.actions = {
+            1: {
+                id: 1,
+                name: "Partner",
+                res_model: "partner",
+                type: "ir.actions.act_window",
+                views: [[false, "form"]],
+                res_id: 1,
+            },
+        };
+
+        const target = getFixture();
+        const webClient = await createWebClient({ serverData });
+        await doAction(webClient, 1);
+
+        assert.strictEqual(
+            target.querySelector(".o_control_panel .o_breadcrumb").textContent,
+            "first record",
             "should have the display name of the record as title"
         );
     });
@@ -12657,6 +12701,84 @@ QUnit.module("Views", (hooks) => {
             await click(target.querySelector(".o_error_dialog .btn-secondary"));
             await nextTick();
             assert.verifySteps(["redirect_action"]);
+        }
+    );
+
+    QUnit.test(
+        "Redirect Warning full feature: additional context, action_id, leaving while dirty",
+        async function (assert) {
+            registry.category("services").add("error", errorService);
+
+            serverData.actions[1] = {
+                id: 1,
+                name: "Partner",
+                res_model: "partner",
+                type: "ir.actions.act_window",
+                views: [[false, "form"]],
+                res_id: 1,
+            };
+            serverData.actions[2] = {
+                id: 2,
+                name: "Partner List",
+                res_model: "partner",
+                type: "ir.actions.act_window",
+                domain: "[['id', 'in', [active_id]]]",
+                views: [[false, "list"]],
+            };
+
+            serverData.views = {
+                "partner,false,list": `
+                    <tree>
+                        <field name="name"/>
+                    </tree>`,
+                "partner,false,form": `
+                    <form>
+                        <group>
+                            <field name="name"/>
+                        </group>
+                    </form>`,
+                "partner,false,search": "<search></search>",
+            };
+
+            const webClient = await createWebClient({
+                serverData,
+                mockRPC(route, { method, kwargs }) {
+                    if (method === "web_save") {
+                        assert.step("web_save");
+                        throw makeServerError({
+                            type: `RedirectWarning`,
+                            args: [
+                                "The message",
+                                2,
+                                "Button Label",
+                                {
+                                    active_id: 4,
+                                },
+                            ],
+                            description: "Beep boop server stuff and technical string",
+                        });
+                    }
+                    if (method === "web_search_read") {
+                        assert.step("web_search_read");
+                        assert.deepEqual(kwargs.domain, [["id", "in", [4]]]);
+                    }
+                },
+            });
+            await doAction(webClient, 1);
+            await editInput(target, ".o_field_widget[name='name'] input", "aaa");
+            await click(target.querySelector(".o_form_button_save"));
+            assert.verifySteps(["web_save"]);
+            await nextTick();
+            assert.containsOnce(target, ".o_error_dialog");
+            assert.containsOnce(target, ".o_error_dialog .btn-primary");
+            assert.containsN(target, ".o_error_dialog .btn-secondary", 2);
+            await click(target.querySelector(".o_error_dialog .btn-secondary"));
+            await nextTick();
+            assert.verifySteps(["web_search_read"]);
+            assert.equal(
+                target.querySelector(".o_breadcrumb").textContent,
+                "first recordPartner List"
+            );
         }
     );
 

@@ -1,5 +1,6 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
-
+from unittest import SkipTest
+from lxml import etree
 from odoo import Command
 from odoo.tests import tagged
 from odoo.addons.l10n_it_edi.tests.common import TestItEdi
@@ -523,3 +524,137 @@ class TestItEdiExport(TestItEdi):
         })
         invoice.action_post()
         self._assert_export_invoice(invoice, 'invoice_lowercase_fields.xml')
+
+    def test_export_XML_exclude_postdated_moves(self):
+        """Test that in case of Credit note A, originated from Invoice A but reconciled
+           with Invoice B, we consider for DatiFattureCollegate xml element only
+           documents dated not after credit note A
+        """
+        invoice_a = self.env['account.move'].with_company(self.company).create({
+            'move_type': 'out_invoice',
+            'invoice_date': '2022-03-24',
+            'invoice_date_due': '2022-03-24',
+            'partner_id': self.italian_partner_a.id,
+            'invoice_line_ids': [
+                Command.create({
+                    'name': "Product A",
+                    'price_unit': 800.40,
+                    'tax_ids': [Command.set(self.default_tax.ids)],
+                })
+            ]
+        })
+        invoice_a.action_post()
+
+        credit_note = invoice_a._reverse_moves([{
+            'invoice_date': '2022-03-24',
+        }])
+        credit_note.write({
+            'invoice_line_ids': [
+                Command.clear(),
+                Command.create({
+                    'name': "Product A",
+                    'price_unit': 500.0,
+                    'tax_ids': [Command.set(self.default_tax.ids)],
+                })
+            ]
+        })
+        credit_note.action_post()
+        credit_note.line_ids.filtered(lambda l: l.account_type == 'asset_receivable').remove_move_reconcile()
+
+        invoice_b = self.env['account.move'].with_company(self.company).create({
+            'move_type': 'out_invoice',
+            'invoice_date': '2022-03-25',
+            'invoice_date_due': '2022-03-25',
+            'partner_id': self.italian_partner_a.id,
+            'invoice_line_ids': [
+                Command.create({
+                    'name': "Product A",
+                    'price_unit': 600,
+                    'tax_ids': [Command.set(self.default_tax.ids)],
+                })
+            ]
+        })
+        invoice_b.action_post()
+        (invoice_b.line_ids + credit_note.line_ids).filtered(lambda line: line.account_type in ('asset_receivable')).reconcile()
+        self._assert_export_invoice(credit_note, 'invoice_exclude_postdated_moves.xml')
+
+    def test_export_XML_oss_tax(self):
+        be_partner = self.env['res.partner'].create({
+            'name': 'Alessi',
+            'vat': 'BE0477472701',
+            'country_id': self.env.ref('base.be').id,
+            'is_company': True,
+        })
+        oss_tag = self.env.ref('l10n_eu_oss.tag_oss', raise_if_not_found=False)
+        if not oss_tag:
+            raise SkipTest("l10n_eu_oss Module not installed")
+
+        oss_tax = self.env['account.tax'].create({
+            'name': 'OSS Tax',
+            'type_tax_use': 'sale',
+            'amount': 20,
+            'country_id': self.company.account_fiscal_country_id.id,
+            'company_id': self.company.id,
+            'invoice_repartition_line_ids': [
+                Command.create({'repartition_type': 'base'}),
+                Command.create({
+                    'repartition_type': 'tax',
+                    'tag_ids': [Command.set(oss_tag.ids)],
+                }),
+            ],
+        })
+
+        invoice = self.env['account.move'].with_company(self.company).create({
+            'move_type': 'out_invoice',
+            'invoice_date': '2022-03-24',
+            'invoice_date_due': '2022-03-24',
+            'partner_id': be_partner.id,
+            'invoice_line_ids': [
+                Command.create({
+                    'name': "Product A",
+                    'price_unit': 100,
+                    'tax_ids': [Command.set(oss_tax.ids)],
+                })
+            ],
+        })
+        invoice.action_post()
+        self._assert_export_invoice(invoice, 'invoice_with_oss_tax.xml')
+
+    def test_export_invoice_uom_unicode_normalization(self):
+        """Test that non-standard Unicode characters (e.g. m², m³) are correctly normalized for XML invoices."""
+        uom_category = self.env['uom.category'].create({
+            'name': 'Test Surface',
+        })
+
+        self.product_a.uom_id = self.product_a.uom_id.copy({'name': 'm²', 'category_id': uom_category.id})
+        invoice = self._create_invoice(
+            partner_id=self.italian_partner_a,
+            post=True,
+            invoice_line_ids=[self._prepare_invoice_line(product_id=self.product_a, price_unit=800.40)],
+        )
+
+        xml = invoice._l10n_it_edi_render_xml()
+        invoice_tree = etree.fromstring(xml)
+
+        uom_nodes = invoice_tree.xpath("//*[local-name()='DettaglioLinee']/*[local-name()='UnitaMisura']")
+        self.assertEqual(uom_nodes[0].text, 'm2')
+
+    def test_reset_to_draft_l10n_it_edi_transaction(self):
+        """
+        In l10n_it_edi, it is possible to receive a bill where l10n_it_edi_transaction is already populated.
+        It should be possible to still reset this move to draft
+        """
+        bill = self.env['account.move'].create({
+            'partner_id': self.partner_a.id,
+            'move_type': 'in_invoice',
+            'invoice_date': '2026-03-24',
+            'l10n_it_edi_transaction': 'transaction',
+            'line_ids': [
+                Command.create({
+                    'name': 'line',
+                    'account_id': self.company_data['default_account_revenue'].id,
+                }),
+            ]
+        })
+        bill.action_post()
+        self.assertEqual(bill.show_reset_to_draft_button, True)

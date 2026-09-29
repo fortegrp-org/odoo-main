@@ -48,17 +48,6 @@ export class SaleOrderManagementScreen extends ControlButtonsMixin(Component) {
         onMounted(this.onMounted);
     }
     onMounted() {
-        // calculate how many can fit in the screen.
-        // It is based on the height of the header element.
-        // So the result is only accurate if each row is just single line.
-        const flexContainer = this.root.el.querySelector(".flex-container");
-        const cpEl = this.root.el.querySelector(".control-panel");
-        const headerEl = this.root.el.querySelector(".header-row");
-        const val = Math.trunc(
-            (flexContainer.offsetHeight - cpEl.offsetHeight - headerEl.offsetHeight) /
-                headerEl.offsetHeight
-        );
-        this.saleOrderFetcher.setNPerPage(val);
         this.saleOrderFetcher.fetch();
     }
     _getSaleOrderOrigin(order) {
@@ -203,13 +192,18 @@ export class SaleOrderManagementScreen extends ControlButtonsMixin(Component) {
                         continue;
                     }
 
+                    let taxIds = orderFiscalPos ? undefined : line.tax_id;
+                    if (line.product_id[0] === this.pos.config.down_payment_product_id[0]) {
+                        taxIds = line.tax_id;
+                    }
+
                     const line_values = {
                         pos: this.pos,
                         order: this.pos.get_order(),
                         product: this.pos.db.get_product_by_id(line.product_id[0]),
                         description: line.name,
                         price: line.price_unit,
-                        tax_ids: orderFiscalPos ? undefined : line.tax_id,
+                        tax_ids: taxIds,
                         price_manually_set: false,
                         price_type: "automatic",
                         sale_order_origin_id: clickedOrder,
@@ -259,6 +253,29 @@ export class SaleOrderManagementScreen extends ControlButtonsMixin(Component) {
                             splitted_line.set_discount(line.discount);
                             this.pos.get_order().add_orderline(splitted_line);
                             remaining_quantity -= splitted_line.quantity;
+                        }
+                    } else if (new_line.get_product().tracking == "lot") {
+                        let total_lot_quantity = 0;
+                        for (const lot of line.lot_names) {
+                            total_lot_quantity += line.lot_qty_by_name[lot] || 0;
+                            const splitted_line = new Orderline({ env: this.env }, line_values);
+                            splitted_line.set_quantity(line.lot_qty_by_name[lot] || 0, true);
+                            splitted_line.set_unit_price(line.price_unit);
+                            splitted_line.set_discount(line.discount);
+                            splitted_line.setPackLotLines({
+                                modifiedPackLotLines: [],
+                                newPackLotLines: [{ lot_name: lot }],
+                                setQuantity: false,
+                            });
+                            this.pos.get_order().add_orderline(splitted_line);
+                        }
+                        if (total_lot_quantity < new_line.quantity) {
+                            const remaining_quantity = new_line.quantity - total_lot_quantity;
+                            const splitted_line = new Orderline({ env: this.env }, line_values);
+                            splitted_line.set_quantity(remaining_quantity, true);
+                            splitted_line.set_unit_price(line.price_unit);
+                            splitted_line.set_discount(line.discount);
+                            this.pos.get_order().add_orderline(splitted_line);
                         }
                     } else {
                         this.pos.get_order().add_orderline(new_line);
@@ -371,8 +388,6 @@ export class SaleOrderManagementScreen extends ControlButtonsMixin(Component) {
         });
 
         // We need one unique line for the fixed amount taxes
-        let fixed_taxes_downpayment = 0;
-        const fixed_taxes_tab = [];
         const down_payment_line_to_create = [];
 
         Object.keys(grouped).forEach((key) => {
@@ -388,14 +403,7 @@ export class SaleOrderManagementScreen extends ControlButtonsMixin(Component) {
             const fixed_taxes = group[0].tax_id.filter(
                 (id) => this.pos.taxes_by_id[id].amount_type === "fixed"
             );
-            const total_qty = group.reduce((total, line) => (total += line.product_uom_qty), 0);
-            fixed_taxes.forEach((tax_id) => {
-                const tax = this.pos.taxes_by_id[tax_id];
-                fixed_taxes_downpayment += tax.amount * total_qty * percentage;
-                fixed_taxes_tab.push(tab);
-            });
 
-            // We need to remove the amount of the fixed tax as they will have a separate line
             const fixed_tax_total_amount = fixed_taxes.reduce((total, tax_id) => {
                 const tax = this.pos.taxes_by_id[tax_id];
                 return total + tax.amount;
@@ -431,19 +439,6 @@ export class SaleOrderManagementScreen extends ControlButtonsMixin(Component) {
             });
         });
 
-        if (fixed_taxes_downpayment !== 0) {
-            // We try to merge the fixed taxes in one line that has no tax if possible
-            const line = down_payment_line_to_create.find((line) => !line.tax_ids.length);
-            if (line) {
-                line.price += fixed_taxes_downpayment;
-            } else {
-                down_payment_line_to_create.push({
-                    price: fixed_taxes_downpayment,
-                    tab: fixed_taxes_tab.flat(),
-                    tax_ids: [],
-                });
-            }
-        }
         for (const down_payment_line of down_payment_line_to_create) {
             this.pos.get_order().add_orderline(
                 new Orderline(

@@ -20,6 +20,8 @@ class PeppolSettingsButtons extends Component {
 
     setup() {
         super.setup();
+        this.orm = useService("orm");
+        this.action = useService("action");
         this.dialogService = useService("dialog");
         this.notification = useService("notification");
         this.state = useState({
@@ -27,8 +29,28 @@ class PeppolSettingsButtons extends Component {
         });
     }
 
+    get useParentCompany() {
+        return Boolean(this.props.record.data.peppol_use_parent_company);
+    }
+
     get proxyState() {
         return this.props.record.data.account_peppol_proxy_state;
+    }
+
+    get ediIdentification() {
+        return this.props.record.data.account_peppol_edi_identification || "";
+    }
+
+    get countryCode() {
+        return this.props.record.data.country_code || "";
+    }
+
+    get isPdpEdiIdentification() {
+        return this.ediIdentification.startsWith('0225:')
+    }
+
+    get showReregisterButton() {
+        return ['pending', 'active'].includes(this.proxyState) && this.countryCode == 'FR' && !this.isPdpEdiIdentification;
     }
 
     get migrationPrepared() {
@@ -44,6 +66,9 @@ class PeppolSettingsButtons extends Component {
     }
 
     get createUserButtonLabel() {
+        if (this.proxyState === "sender") {
+            return _t("Allow reception");
+        }
         const modes = {
             demo: _t("Validate registration (Demo)"),
             test: _t("Validate registration (Test)"),
@@ -56,14 +81,15 @@ class PeppolSettingsButtons extends Component {
         const modes = {
             demo: _t("Switch to Live"),
         }
-        return this.modeConstraint !== "demo" && modes[this.ediMode] || _t("Deregister from Peppol");
+        const deregister_label = this.isPdpEdiIdentification ? _t("Remove from Approved Platform") : _t("Deregister from Peppol")
+        return this.modeConstraint !== "demo" && modes[this.ediMode] || deregister_label;
     }
 
     async _callConfigMethod(methodName, save = false) {
         if (save) {
             await this._save();
         }
-        this.env.onClickViewButton({
+        return this.env.onClickViewButton({
             clickParams: {
                 name: methodName,
                 type: "object",
@@ -75,12 +101,18 @@ class PeppolSettingsButtons extends Component {
     }
 
     async _save () {
-        this.env.model.root.save({ reload: false });
+        await this.env.model.root.save({ reload: false });
     }
 
     showConfirmation(warning, methodName) {
         const message = _t(warning);
-        const confirmMessage = _t("You will not be able to send or receive Peppol documents in Odoo anymore. Are you sure you want to proceed?");
+        const confirmMessage = this.isPdpEdiIdentification
+            ? (this.proxyState === 'sender'
+                 ? _t("You will not be able to send documents via the Odoo Approved Platform anymore. Are you sure you want to proceed?")
+                 : _t("You will not be able to send or receive documents via the Odoo Approved Platform anymore. Are you sure you want to proceed?"))
+            : (this.proxyState === 'sender'
+                 ? _t("You will not be able to send Peppol documents in Odoo anymore. Are you sure you want to proceed?")
+                 : _t("You will not be able to send or receive Peppol documents in Odoo anymore. Are you sure you want to proceed?"));
         this.dialogService.add(ConfirmationDialog, {
             body: markup(
                 `<div class="text-danger">${escape(message)}</div>
@@ -98,10 +130,19 @@ class PeppolSettingsButtons extends Component {
             this._callConfigMethod("button_deregister_peppol_participant");
         } else {
             this.showConfirmation(
-                "This will delete your Peppol registration.",
+                this.isPdpEdiIdentification ? _t("This will delete your Approved Platform registration.") : _t("This will delete your Peppol registration."),
                 "button_deregister_peppol_participant"
             )
         }
+    }
+
+    async deregisterToSender() {
+        await this._callConfigMethod("button_peppol_reset_to_sender");
+    }
+
+    async allowReception() {
+        await this._callConfigMethod("button_peppol_register_sender_as_receiver", true);
+        await this.env.model.root.load();
     }
 
     async updateDetails() {
@@ -129,7 +170,66 @@ class PeppolSettingsButtons extends Component {
     }
 
     async createUser() {
-        await this._callConfigMethod("button_create_peppol_proxy_user", true);
+        const record = this.props.record;
+        const countryCode = record.data.company_country_code || record.data.country_code;
+        const isFrenchCompany = ['FR', 'GP', 'MQ', 'RE'].includes(countryCode);
+        const isFrenchEas = ['0225', '0009', '9957', '0002'].includes(record.data.account_peppol_eas);
+
+        if (!(isFrenchCompany || isFrenchEas)) {
+            await this._createUser();
+            return
+        }
+
+        this.dialogService.add(ConfirmationDialog, {
+            title: _t("French Company Registration"),
+            body: _t("If you want to use the French E-Invoicing via Approved Platform, please consider installing the module `France - E-Invoicing (Approved Platform)` before registering here. Are you sure you want to continue?"),
+            confirmLabel: _t("OK"),
+            cancelLabel: _t("Cancel"),
+            confirm: () => this._createUser(),
+            cancel: () => {},
+        });
+    }
+
+    async _createUser() {
+        const record = this.props.record;
+        try {
+            await this._save();
+            const action = await this.orm.call(
+                record.resModel,
+                "button_register_with_kyc",
+                [[record.resId]],
+                { context: record.context }
+            );
+            await this.action.doAction(action);
+        } catch (error) {
+            const isAlreadyRegisteredError = (
+                error.exceptionName?.endsWith("EndpointAlreadyRegisteredError")
+                || error.data?.name?.endsWith("EndpointAlreadyRegisteredError")
+            );
+            if (!isAlreadyRegisteredError) {
+                throw error;
+            }
+            this.dialogService.add(ConfirmationDialog, {
+                body: error.data?.message || error.message,
+                confirmLabel: _t("OK"),
+                cancelLabel: _t("Cancel"),
+                confirm: async () => {
+                    await this._save();
+                    const action = await this.orm.call(
+                        record.resModel,
+                        "button_create_peppol_proxy_user_sender_only",
+                        [[record.resId]],
+                        { context: record.context }
+                    );
+                    await this.action.doAction(action);
+                },
+                cancel: () => { },
+            });
+        }
+    }
+
+    async reregister() {
+        await this._callConfigMethod("button_peppol_reregister");
     }
 }
 

@@ -6,7 +6,6 @@ import werkzeug
 
 from ast import literal_eval
 from collections import Counter
-from werkzeug.datastructures import OrderedMultiDict
 from werkzeug.exceptions import NotFound
 
 from odoo import fields, http, _
@@ -29,7 +28,7 @@ class WebsiteEventController(http.Controller):
 
     def _get_events_search_options(self, **post):
         return {
-            'displayDescription': False,
+            'displayDescription': True,
             'displayDetail': False,
             'displayExtraDetail': False,
             'displayExtraLink': False,
@@ -133,7 +132,7 @@ class WebsiteEventController(http.Controller):
 
         if searches['date'] == 'old':
             # the only way to display this content is to set date=old so it must be canonical
-            values['canonical_params'] = OrderedMultiDict([('date', 'old')])
+            values['canonical_params'] = {'date': 'old'}
 
         return request.render("website_event.index", values)
 
@@ -270,8 +269,12 @@ class WebsiteEventController(http.Controller):
         allowed_fields = request.env['event.registration']._get_website_registration_allowed_fields()
         registration_fields = {key: v for key, v in request.env['event.registration']._fields.items() if key in allowed_fields}
         for ticket_id in list(filter(lambda x: x is not None, [form_details[field] if 'event_ticket_id' in field else None for field in form_details.keys()])):
-            if int(ticket_id) not in event.event_ticket_ids.ids and len(event.event_ticket_ids.ids) > 0:
-                raise UserError(_("This ticket is not available for sale for this event"))
+            ticket_id = int(ticket_id)
+            # ticket_id=0 means "no ticket selected", only valid on events without tickets
+            if ticket_id or event.event_ticket_ids:
+                ticket = event.event_ticket_ids.filtered(lambda t: t.id == ticket_id)
+                if not ticket or not ticket.is_launched or ticket.is_expired:
+                    raise UserError(_("This ticket is not available for sale for this event"))
         registrations = {}
         general_answer_ids = []
         general_identification_answers = {}

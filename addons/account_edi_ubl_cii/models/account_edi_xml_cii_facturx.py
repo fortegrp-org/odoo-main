@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from odoo import models, _
 from odoo.tools import DEFAULT_SERVER_DATE_FORMAT, float_repr, is_html_empty, html2plaintext, cleanup_xml_node
+from odoo.addons.account_edi_ubl_cii.models.account_edi_common import FloatFmt
 from lxml import etree
 
 from datetime import datetime
@@ -11,6 +12,12 @@ _logger = logging.getLogger(__name__)
 
 DEFAULT_FACTURX_DATE_FORMAT = '%Y%m%d'
 
+# Imcomplete, full list on https://service.unece.org/trade/untdid/d16b/tred/tred4461.htm
+PAYMENT_MEAN_CODES = {
+    'Payment to bank account': 42,
+    'SEPA direct debit': 59
+}
+
 
 class AccountEdiXmlCII(models.AbstractModel):
     _name = "account.edi.xml.cii"
@@ -18,6 +25,8 @@ class AccountEdiXmlCII(models.AbstractModel):
     _description = "Factur-x/XRechnung CII 2.2.0"
 
     def _export_invoice_filename(self, invoice):
+        if invoice.commercial_partner_id.country_code == 'DE':
+            return f"{invoice.name.replace('/', '_')}_zugferd.xml"
         return f"{invoice.name.replace('/', '_')}_factur_x.xml"
 
     def _export_invoice_ecosio_schematrons(self):
@@ -105,6 +114,7 @@ class AccountEdiXmlCII(models.AbstractModel):
             'type_code': '380' if invoice.move_type == 'out_invoice' else '381',
             'issue_date_time': invoice.invoice_date,
             'included_note': html2plaintext(invoice.narration) if invoice.narration else "",
+            'included_note_list': [],
         }
 
     def _export_invoice_vals(self, invoice):
@@ -114,9 +124,15 @@ class AccountEdiXmlCII(models.AbstractModel):
             dt = dt or datetime.now()
             return dt.strftime(DEFAULT_FACTURX_DATE_FORMAT)
 
+        product_price_dp = self.env['decimal.precision'].precision_get('Product Price')
+
         def format_monetary(number, decimal_places=2):
             # Facturx requires the monetary values to be rounded to 2 decimal values
             return float_repr(number, decimal_places)
+
+        def format_unit_price(number):
+            # Unit prices keep the 'Product Price' precision instead of the 2 decimals of the amounts
+            return str(FloatFmt(number, 2, max(2, product_price_dp)))
 
         def grouping_key_generator(base_line, tax_values):
             tax = tax_values['tax_repartition_line'].tax_id
@@ -162,6 +178,7 @@ class AccountEdiXmlCII(models.AbstractModel):
             'tax_details': tax_details,
             'format_date': format_date,
             'format_monetary': format_monetary,
+            'format_unit_price': format_unit_price,
             'is_html_empty': is_html_empty,
             'scheduled_delivery_time': self._get_scheduled_delivery_time(invoice),
             'intracom_delivery': False,
@@ -184,6 +201,21 @@ class AccountEdiXmlCII(models.AbstractModel):
             line = line_vals['line']
             line_vals['unece_uom_code'] = self._get_uom_unece_code(line)
 
+            if line._fields.get('deferred_start_date') and (line.deferred_start_date or line.deferred_end_date):
+                line_vals['billing_start'] = line.deferred_start_date
+                line_vals['billing_end'] = line.deferred_end_date
+
+        # [BR - IC - 11] - In an Invoice with a VAT breakdown (BG-23) where the VAT category code (BT-118) is
+        # "Intra-community supply" the Actual delivery date (BT-72) or the Invoicing period (BG-14) shall not be blank.
+        billing_start_dates = [invoice.invoice_date] if invoice.invoice_date else []
+        billing_start_dates += [line_vals['billing_start'] for line_vals in template_values['invoice_line_vals_list'] if line_vals.get('billing_start')]
+        billing_end_dates = [invoice.invoice_date_due] if invoice.invoice_date_due else []
+        billing_end_dates += [line_vals['billing_end'] for line_vals in template_values['invoice_line_vals_list'] if line_vals.get('billing_end')]
+        if billing_start_dates:
+            template_values['billing_start'] = min(billing_start_dates)
+        if billing_end_dates:
+            template_values['billing_end'] = max(billing_end_dates)
+
         # data used for ApplicableHeaderTradeSettlement / ApplicableTradeTax (at the end of the xml)
         for tax_detail_vals in template_values['tax_details']['tax_details'].values():
             # /!\ -0.0 == 0.0 in python but not in XSLT, so it can raise a fatal error when validating the XML
@@ -193,12 +225,6 @@ class AccountEdiXmlCII(models.AbstractModel):
 
             if tax_detail_vals.get('tax_category_code') == 'K':
                 template_values['intracom_delivery'] = True
-            # [BR - IC - 11] - In an Invoice with a VAT breakdown (BG-23) where the VAT category code (BT-118) is
-            # "Intra-community supply" the Actual delivery date (BT-72) or the Invoicing period (BG-14) shall not be blank.
-            if tax_detail_vals.get('tax_category_code') == 'K' and not template_values['scheduled_delivery_time']:
-                date_range = self._get_invoicing_period(invoice)
-                template_values['billing_start'] = min(date_range)
-                template_values['billing_end'] = max(date_range)
 
         # Fixed taxes: add them as charges on the invoice lines
         for line_vals in template_values['invoice_line_vals_list']:
@@ -216,6 +242,11 @@ class AccountEdiXmlCII(models.AbstractModel):
 
             line_vals['quantity'] = line_vals['line'].quantity #/!\ The quantity is the line.quantity since we keep the unece_uom_code!
 
+            # The unit prices are taken from the line subtotal to keep all their decimals
+            if line_vals['line'].quantity:
+                line_vals['price_subtotal_unit'] = line_vals['line'].price_subtotal / line_vals['line'].quantity
+                line_vals['gross_price_total_unit'] = line_vals['price_subtotal_before_discount'] / line_vals['line'].quantity
+
             # Invert the quantity and the gross_price_total_unit if a line has a negative price total
             if line_vals['line'].currency_id.compare_amounts(line_vals['gross_price_total_unit'], 0) == -1:
                 line_vals['quantity'] *= -1
@@ -225,6 +256,11 @@ class AccountEdiXmlCII(models.AbstractModel):
         # Fixed taxes: set the total adjusted amounts on the document level
         template_values['tax_basis_total_amount'] = tax_details['base_amount_currency']
         template_values['tax_total_amount'] = tax_details['tax_amount_currency']
+
+        if invoice._fields.get('sdd_mandate_id') and invoice.sdd_mandate_id:
+            template_values['payment_means_code'] = PAYMENT_MEAN_CODES['SEPA direct debit']
+        else:
+            template_values['payment_means_code'] = PAYMENT_MEAN_CODES['Payment to bank account']
 
         return template_values
 
@@ -276,6 +312,8 @@ class AccountEdiXmlCII(models.AbstractModel):
             bank_detail_node.findtext('{*}PayeePartyCreditorFinancialAccount/{*}IBANID')
             or bank_detail_node.findtext('{*}PayeePartyCreditorFinancialAccount/{*}ProprietaryID')
             for bank_detail_node in bank_detail_nodes
+            if bank_detail_node.findtext('{*}PayeePartyCreditorFinancialAccount/{*}IBANID')
+            or bank_detail_node.findtext('{*}PayeePartyCreditorFinancialAccount/{*}ProprietaryID')
         ]
 
         if bank_details:
@@ -343,6 +381,17 @@ class AccountEdiXmlCII(models.AbstractModel):
         line_nodes = tree.findall('./{*}SupplyChainTradeTransaction/{*}IncludedSupplyChainTradeLineItem')
         if line_nodes is not None:
             for invl_el in line_nodes:
+                # Avoid creating a line if its LineExtensionAmount is missing/empty/zero.
+                line_total_node = invl_el.find('./{*}SpecifiedLineTradeSettlement/{*}SpecifiedTradeSettlementLineMonetarySummation/{*}LineTotalAmount')
+                if line_total_node is None or not (line_total_node.text and line_total_node.text.strip()):
+                    continue
+                try:
+                    if float(line_total_node.text) == 0:
+                        continue
+                except (ValueError, TypeError):
+                    # If the value is not a valid number, skip creating the line.
+                    continue
+
                 invoice_line = invoice.invoice_line_ids.create({'move_id': invoice.id})
                 invl_logs = self._import_fill_invoice_line_form(invoice.journal_id, invl_el, invoice, invoice_line, qty_factor)
                 logs += invl_logs
@@ -362,6 +411,16 @@ class AccountEdiXmlCII(models.AbstractModel):
         # force original line description instead of the one copied from product's Sales Description
         if name:
             invoice_line.name = name
+
+        # Start and End date (enterprise fields)
+        if invoice_line._fields.get('deferred_start_date'):
+            billing_start = tree.find('./{*}SpecifiedLineTradeSettlement/{*}BillingSpecifiedPeriod/{*}StartDateTime/{*}DateTimeString')
+            billing_end = tree.find('./{*}SpecifiedLineTradeSettlement/{*}BillingSpecifiedPeriod/{*}EndDateTime/{*}DateTimeString')
+            if billing_start is not None and billing_end is not None:  # there is a constraint forcing none or the two to be set
+                invoice_line.write({
+                    'deferred_start_date': datetime.strptime(billing_start.text.strip(), DEFAULT_FACTURX_DATE_FORMAT),
+                    'deferred_end_date': datetime.strptime(billing_end.text.strip(), DEFAULT_FACTURX_DATE_FORMAT),
+                })
 
         xpath_dict = {
             'basis_qty': [
@@ -397,10 +456,11 @@ class AccountEdiXmlCII(models.AbstractModel):
         move_type_code = tree.find('.//{*}ExchangedDocument/{*}TypeCode')
         if move_type_code is None:
             return None, None
-        if move_type_code.text == '381':
+        if move_type_code.text in ['381', '261']:
             return 'refund', 1
-        if move_type_code.text == '380':
-            amount_node = tree.find('.//{*}SpecifiedTradeSettlementHeaderMonetarySummation/{*}TaxBasisTotalAmount')
+        if move_type_code.text in ['380', '389', '527']:
+            amount_node = tree.find('.//{*}SpecifiedTradeSettlementHeaderMonetarySummation/{*}GrandTotalAmount')
             if amount_node is not None and float(amount_node.text) < 0:
                 return 'refund', -1
             return 'invoice', 1
+        return None, None

@@ -1,24 +1,25 @@
 # Translation of Odoo Server.
 # This file contains the translation of the following modules:
 # 	* utm
-# 
+#
 # Translators:
 # Wil Odoo, 2023
 # Rasareeyar Lappiam, 2024
-# 
+#
 msgid ""
 msgstr ""
 "Project-Id-Version: Odoo Server 17.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2024-08-13 10:28+0000\n"
-"PO-Revision-Date: 2023-10-26 23:09+0000\n"
-"Last-Translator: Rasareeyar Lappiam, 2024\n"
-"Language-Team: Thai (https://app.transifex.com/odoo/teams/41243/th/)\n"
+"POT-Creation-Date: 2025-12-29 18:38+0000\n"
+"PO-Revision-Date: 2026-08-07 01:27+0000\n"
+"Last-Translator: Anonymous <noreply@weblate.org>\n"
+"Language-Team: Thai <https://translate.odoo.com/projects/odoo-17/utm/th/>\n"
+"Language: th\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: \n"
-"Language: th\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
+"X-Generator: Weblate 2026.6.1\n"
 
 #. module: utm
 #. odoo-python
@@ -220,7 +221,6 @@ msgstr "ปรับใช้"
 #. module: utm
 #. odoo-javascript
 #: code:addons/utm/static/src/js/utm_campaign_kanban_examples.js:0
-#: code:addons/utm/static/src/js/utm_campaign_kanban_examples.js:0
 #: model:utm.stage,name:utm.campaign_stage_2
 #, python-format
 msgid "Design"
@@ -237,8 +237,6 @@ msgstr "แสดงชื่อ"
 
 #. module: utm
 #. odoo-javascript
-#: code:addons/utm/static/src/js/utm_campaign_kanban_examples.js:0
-#: code:addons/utm/static/src/js/utm_campaign_kanban_examples.js:0
 #: code:addons/utm/static/src/js/utm_campaign_kanban_examples.js:0
 #, python-format
 msgid "Done"
@@ -281,8 +279,7 @@ msgid ""
 "Gather data, build a recipient list and write content based on your "
 "Marketing target."
 msgstr ""
-"รวบรวมข้อมูล สร้างรายชื่อผู้รับ "
-"และเขียนเนื้อหาอิงตามเป้าหมายทางการตลาดของคุณ"
+"รวบรวมข้อมูล สร้างรายชื่อผู้รับ และเขียนเนื้อหาอิงตามเป้าหมายทางการตลาดของคุณ"
 
 #. module: utm
 #: model_terms:ir.ui.view,arch_db:utm.view_utm_campaign_view_search
@@ -305,7 +302,6 @@ msgstr "ไอดี"
 
 #. module: utm
 #. odoo-javascript
-#: code:addons/utm/static/src/js/utm_campaign_kanban_examples.js:0
 #: code:addons/utm/static/src/js/utm_campaign_kanban_examples.js:0
 #, python-format
 msgid "Ideas"
@@ -416,8 +412,7 @@ msgid ""
 "Prepare your Campaign, test it with part of your audience and deploy it "
 "fully afterwards."
 msgstr ""
-"เตรียมแคมเปญของคุณ ทดสอบกับผู้ชมบางส่วนของคุณ "
-"และปรับใช้อย่างเต็มที่ในภายหลัง"
+"เตรียมแคมเปญของคุณ ทดสอบกับผู้ชมบางส่วนของคุณ และปรับใช้อย่างเต็มที่ในภายหลัง"
 
 #. module: utm
 #. odoo-javascript
@@ -439,7 +434,6 @@ msgstr "คืนค่า"
 
 #. module: utm
 #. odoo-javascript
-#: code:addons/utm/static/src/js/utm_campaign_kanban_examples.js:0
 #: code:addons/utm/static/src/js/utm_campaign_kanban_examples.js:0
 #, python-format
 msgid "Review"
@@ -470,14 +464,12 @@ msgstr "ค้นหาวิธีที่เข้ามา UTM"
 #. module: utm
 #. odoo-javascript
 #: code:addons/utm/static/src/js/utm_campaign_kanban_examples.js:0
-#: code:addons/utm/static/src/js/utm_campaign_kanban_examples.js:0
 #, python-format
 msgid "Send"
 msgstr "ส่ง"
 
 #. module: utm
 #. odoo-javascript
-#: code:addons/utm/static/src/js/utm_campaign_kanban_examples.js:0
 #: code:addons/utm/static/src/js/utm_campaign_kanban_examples.js:0
 #: model:utm.stage,name:utm.campaign_stage_3
 #, python-format
@@ -538,11 +530,11 @@ msgstr "สถานะ"
 #. module: utm
 #: model_terms:ir.actions.act_window,help:utm.action_view_utm_stage
 msgid ""
-"Stages allow you to organize your workflow  (e.g. plan, design, in progress,"
-" done, …)."
+"Stages allow you to organize your workflow  (e.g. plan, design, in progress, "
+"done, …)."
 msgstr ""
-"ขั้นตอนช่วยให้คุณสามารถจัดระเบียบเวิร์กโฟลว์ของคุณได้ (เช่น แผน การออกแบบ "
-"กำลังดำเนินการ เสร็จแล้ว …)"
+"ขั้นตอนช่วยให้คุณสามารถจัดระเบียบเวิร์กโฟลว์ของคุณได้ (เช่น แผน การออกแบบ กำลังดำเนินการ เสร็"
+"จแล้ว …)"
 
 #. module: utm
 #: model:ir.model.fields,help:utm.field_utm_tag__color
@@ -550,8 +542,7 @@ msgid ""
 "Tag color. No color means no display in kanban to distinguish internal tags "
 "from public categorization tags."
 msgstr ""
-"แท็กสี "
-"ไม่มีสีหมายความว่าไม่มีการแสดงในคัมบังเพื่อแยกแท็กภายในออกจากแท็กการจัดหมวดหมู่สาธารณะ"
+"แท็กสี ไม่มีสีหมายความว่าไม่มีการแสดงในคัมบังเพื่อแยกแท็กภายในออกจากแท็กการจัดหมวดหมู่สาธารณะ"
 
 #. module: utm
 #: model:ir.model.constraint,message:utm.constraint_utm_tag_name_uniq
@@ -572,9 +563,8 @@ msgid ""
 "The UTM medium '%s' cannot be deleted as it is used in some main functional "
 "flows, such as the recruitment and the mass mailing."
 msgstr ""
-"ไม่สามารถลบวิธีที่เข้ามา UTM '%s' ได้ "
-"เนื่องจากถูกใช้ในขั้นตอนการทำงานหลักบางอย่าง เช่น "
-"การสรรหาบุคลากรและการส่งไปรษณีย์จำนวนมาก"
+"ไม่สามารถลบวิธีที่เข้ามา UTM '%s' ได้ เนื่องจากถูกใช้ในขั้นตอนการทำงานหลักบางอย่าง เช่น การสร"
+"รหาบุคลากรและการส่งไปรษณีย์จำนวนมาก"
 
 #. module: utm
 #: model:ir.model.constraint,message:utm.constraint_utm_campaign_unique_name
@@ -600,11 +590,10 @@ msgstr "สัปดาห์นี้"
 #. module: utm
 #: model:ir.model.fields,help:utm.field_utm_mixin__campaign_id
 msgid ""
-"This is a name that helps you keep track of your different campaign efforts,"
-" e.g. Fall_Drive, Christmas_Special"
+"This is a name that helps you keep track of your different campaign efforts, "
+"e.g. Fall_Drive, Christmas_Special"
 msgstr ""
-"ชื่อนี้ช่วยให้คุณติดตามความพยายามของแคมเปญต่าง ๆ เช่น Fall_Drive, "
-"Christmas_Special"
+"ชื่อนี้ช่วยให้คุณติดตามความพยายามของแคมเปญต่าง ๆ เช่น Fall_Drive, Christmas_Special"
 
 #. module: utm
 #: model:ir.model.fields,help:utm.field_utm_mixin__medium_id
@@ -631,11 +620,11 @@ msgstr "ได้รับการอนุมัติ"
 #: code:addons/utm/static/src/js/utm_campaign_kanban_examples.js:0
 #, python-format
 msgid ""
-"Track incoming events (e.g. Christmas, Black Friday, ...) and publish timely"
-" content."
+"Track incoming events (e.g. Christmas, Black Friday, ...) and publish timely "
+"content."
 msgstr ""
-"ติดตามกิจกรรมที่กำลังจะเกิดขึ้น (เช่น คริสต์มาส แบล็กฟรายเดย์ ...) "
-"และเผยแพร่เนื้อหาอย่างทันท่วงที"
+"ติดตามกิจกรรมที่กำลังจะเกิดขึ้น (เช่น คริสต์มาส แบล็กฟรายเดย์ ...) และเผยแพร่เนื้อหาอย่างทันท่วง"
+"ที"
 
 #. module: utm
 #: model:ir.model,name:utm.model_utm_campaign
@@ -660,8 +649,8 @@ msgid ""
 "UTM Mediums track the mean that was used to attract traffic (e.g. "
 "\"Website\", \"Twitter\", ...)."
 msgstr ""
-"วิธีที่เข้ามา UTM ติดตามค่าเฉลี่ยที่ใช้ในการดึงดูดการเข้าชม (เช่น "
-"\"เว็บไซต์\", \"Twitter\", ...)"
+"วิธีที่เข้ามา UTM ติดตามค่าเฉลี่ยที่ใช้ในการดึงดูดการเข้าชม (เช่น \"เว็บไซต์\", \"Twitter\", "
+"...)"
 
 #. module: utm
 #: model:ir.model,name:utm.model_utm_mixin
@@ -681,11 +670,10 @@ msgstr "มิกซ์อินแหล่งที่มา UTM"
 #. module: utm
 #: model_terms:ir.actions.act_window,help:utm.utm_source_action
 msgid ""
-"UTM Sources track where traffic comes from  (e.g. \"May Newsletter\", \"\", "
-"...)."
+"UTM Sources track where traffic comes from  (e.g. \"May Newsletter\", "
+"\"\", ...)."
 msgstr ""
-"แหล่งที่มา UTM ติดตามที่มาของการเข้าชม (เช่น \"จดหมายข่าวพฤษภาคม\", \"\", "
-"...)"
+"แหล่งที่มา UTM ติดตามที่มาของการเข้าชม (เช่น \"จดหมายข่าวพฤษภาคม\", \"\", ...)"
 
 #. module: utm
 #: model:ir.actions.act_window,name:utm.action_view_utm_stage

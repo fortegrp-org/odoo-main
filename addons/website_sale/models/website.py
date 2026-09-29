@@ -131,7 +131,7 @@ class Website(models.Model):
     @api.depends('all_pricelist_ids', 'pricelist_id', 'company_id')
     def _compute_currency_id(self):
         for website in self:
-            website.currency_id = website.pricelist_id.currency_id or website.company_id.currency_id
+            website.currency_id = website.pricelist_id.currency_id or website.company_id.sudo().currency_id
 
     def _compute_enabled_delivery(self):
         for website in self:
@@ -423,6 +423,7 @@ class Website(models.Model):
     def _prepare_sale_order_values(self, partner_sudo):
         self.ensure_one()
         addr = partner_sudo.address_get(['delivery', 'invoice'])
+        fiscal_position = self.fiscal_position_id
         if not request.website.is_public_user():
             last_sale_order = self.env['sale.order'].sudo().search(
                 [('partner_id', '=', partner_sudo.id), ('website_id', '=', self.id)],
@@ -442,16 +443,16 @@ class Website(models.Model):
                     and partner_invoice.commercial_partner_id == partner_sudo
                 ):
                     addr['invoice'] = partner_invoice.id
+                fiscal_position = self.env['account.fiscal.position']
 
         affiliate_id = request.session.get('affiliate_id')
         salesperson_user_sudo = self.env['res.users'].sudo().browse(affiliate_id).exists()
         if not salesperson_user_sudo:
-            salesperson_user_sudo = self.salesperson_id or partner_sudo.parent_id.user_id or partner_sudo.user_id
+            salesperson_user_sudo = self.salesperson_id or partner_sudo.user_id or partner_sudo.parent_id.user_id
 
         values = {
             'company_id': self.company_id.id,
 
-            'fiscal_position_id': self.fiscal_position_id.id,
             'partner_id': partner_sudo.id,
             'partner_invoice_id': addr['invoice'],
             'partner_shipping_id': addr['delivery'],
@@ -463,6 +464,9 @@ class Website(models.Model):
             'user_id': salesperson_user_sudo.id,
             'website_id': self.id,
         }
+
+        if fiscal_position:
+            values['fiscal_position_id'] = fiscal_position.id
 
         return values
 
@@ -567,7 +571,11 @@ class Website(models.Model):
             (all_abandoned_carts - abandoned_carts).cart_recovery_email_sent = True
             for sale_order in abandoned_carts:
                 template = self.env.ref('website_sale.mail_template_sale_cart_recovery')
-                template.send_mail(sale_order.id, email_values=dict(email_to=sale_order.partner_id.email))
+                # fallback email_vals in case partner_to and email_to were emptied
+                email_vals = {} if template.email_to or template.partner_to else {
+                    'email_to': sale_order.partner_id.email_formatted
+                }
+                template.send_mail(sale_order.id, email_values=email_vals)
                 sale_order.cart_recovery_email_sent = True
 
     def _display_partner_b2b_fields(self):

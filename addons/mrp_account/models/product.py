@@ -75,7 +75,7 @@ class ProductProduct(models.Model):
             line_qty = bom_line.product_uom_id._compute_quantity(bom_lines[bom_line]['qty'], bom_line.product_id.uom_id)
             moves = self.env['stock.move'].concat(*moves_list)
             value += line_qty * bom_line.product_id._compute_average_price(qty_invoiced * line_qty, qty_to_invoice * line_qty, moves, is_returned=is_returned)
-        return value
+        return bom.product_uom_id._compute_price(value / bom.product_qty, self.uom_id)
 
     def _compute_bom_price(self, bom, boms_to_recompute=False, byproduct_bom=False):
         self.ensure_one()
@@ -116,15 +116,6 @@ class ProductProduct(models.Model):
             if byproduct_cost_share:
                 total *= float_round(1 - byproduct_cost_share / 100, precision_rounding=0.0001)
             return bom.product_uom_id._compute_price(total / bom.product_qty, self.uom_id)
-
-    def _get_fifo_candidates_domain(self, company):
-        fifo_candidates_domain = super()._get_fifo_candidates_domain(company)
-        if self in self.env.context.get('product_unbuild_map', ()):
-            fifo_candidates_domain = expression.AND([
-                fifo_candidates_domain,
-                [('stock_move_id', 'in', self.env.context['product_unbuild_map'][self].mo_id.move_finished_ids.ids)]
-            ])
-        return fifo_candidates_domain
 
 
 class ProductCategory(models.Model):

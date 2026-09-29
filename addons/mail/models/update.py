@@ -3,6 +3,7 @@
 
 import datetime
 import logging
+import json
 
 import requests
 import werkzeug.urls
@@ -13,7 +14,7 @@ from odoo import api, release, SUPERUSER_ID
 from odoo.exceptions import UserError
 from odoo.models import AbstractModel
 from odoo.tools.translate import _
-from odoo.tools import config, misc, ustr
+from odoo.tools import config, misc
 
 _logger = logging.getLogger(__name__)
 

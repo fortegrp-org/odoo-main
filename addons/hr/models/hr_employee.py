@@ -87,6 +87,7 @@ class HrEmployeePrivate(models.Model):
         domain="[('partner_id', '=', work_contact_id), '|', ('company_id', '=', False), ('company_id', '=', company_id)]",
         groups="hr.group_hr_user",
         tracking=True,
+        copy=False,
         help='Employee bank account to pay salaries')
     permit_no = fields.Char('Work Permit No', groups="hr.group_hr_user", tracking=True)
     visa_no = fields.Char('Visa No', groups="hr.group_hr_user", tracking=True)
@@ -238,6 +239,11 @@ class HrEmployeePrivate(models.Model):
         self.flush_recordset(field_names)
         public = self.env['hr.employee.public'].browse(self._ids)
         public.fetch(field_names)
+        # make sure all related fields from employee are in cache
+        for field_name in field_names:
+            field = self.env['hr.employee.public']._fields[field_name]
+            if field.related and field.related_field.model_name == 'hr.employee':
+                public.mapped(field_name)
         self._copy_cache_from(public, field_names)
 
     def _check_private_fields(self, field_names):
@@ -252,10 +258,15 @@ class HrEmployeePrivate(models.Model):
         # copy them to the cache of self; non-public data will be missing from
         # cache, and interpreted as an access error
         for fname in field_names:
-            values = self.env.cache.get_values(public, public._fields[fname])
+            public_field = public._fields[fname]
+            # only copy the values that are in cache: get_values() skips the
+            # missing ones, which would misalign values with self's ids
+            missing_ids = set(self.env.cache.get_missing_ids(public, public_field))
+            cached = public.browse(id_ for id_ in public._ids if id_ not in missing_ids) if missing_ids else public
+            values = self.env.cache.get_values(cached, public_field)
             if self._fields[fname].translate:
                 values = [(value.copy() if value else None) for value in values]
-            self.env.cache.update_raw(self, self._fields[fname], values)
+            self.env.cache.update_raw(self.browse(cached._ids), self._fields[fname], values)
 
     @api.model
     def _cron_check_work_permit_validity(self):
@@ -494,7 +505,7 @@ class HrEmployeePrivate(models.Model):
             employee_fields_to_empty = self._get_employee_m2o_to_empty_on_archived_employees()
             user_fields_to_empty = self._get_user_m2o_to_empty_on_archived_employees()
             employee_domain = [[(field, 'in', archived_employees.ids)] for field in employee_fields_to_empty]
-            user_domain = [[(field, 'in', archived_employees.user_id.ids) for field in user_fields_to_empty]]
+            user_domain = [[(field, 'in', archived_employees.user_id.ids)] for field in user_fields_to_empty]
             employees = self.env['hr.employee'].search(expression.OR(employee_domain + user_domain))
             for employee in employees:
                 for field in employee_fields_to_empty:

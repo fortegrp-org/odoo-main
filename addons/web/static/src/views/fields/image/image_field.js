@@ -1,6 +1,12 @@
 /** @odoo-module **/
 
-import { isMobileOS } from "@web/core/browser/feature_detection";
+import {
+    isAndroid,
+    isAndroidApp,
+    isBrowserFirefox,
+    isBrowserSafari,
+    isMobileOS,
+} from "@web/core/browser/feature_detection";
 import { _t } from "@web/core/l10n/translation";
 import { registry } from "@web/core/registry";
 import { useService } from "@web/core/utils/hooks";
@@ -20,6 +26,9 @@ export const fileTypeMagicWordMap = {
     U: "webp",
 };
 const placeholder = "/web/static/img/placeholder.png";
+// invalid mimetype used to force the browsers based on Chromium to suggest the "Camera"
+// option, see the acceptedFileExtensions getter
+const cameraHintMimetype = "dummy/allowAndroidCamera";
 
 /**
  * Formats a value to be injected in the image's url in order for that url
@@ -67,10 +76,9 @@ export class ImageField extends Component {
 
         if (this.props.record.fields[this.props.name].related) {
             this.lastUpdate = DateTime.now();
-            let key = this.props.value;
+            let key = this.props.record.data[this.props.name];
             onWillRender(() => {
-                const nextKey = this.props.value;
-
+                const nextKey = this.props.record.data[this.props.name];
                 if (key !== nextKey) {
                     this.lastUpdate = DateTime.now();
                 }
@@ -78,6 +86,27 @@ export class ImageField extends Component {
                 key = nextKey;
             });
         }
+    }
+
+    /**
+     * Since Android 14, Chromium sends a file input accepting only images straight to the photo
+     * picker, which has no "Camera" entry, so the user cannot take a photo anymore. Appending a
+     * mimetype which is not an image is enough to get the generic chooser, and its camera, back.
+     *
+     * The workaround is limited to the browsers needing it: it is an Android issue, the native app
+     * builds its own file chooser out of the accept attribute, and Firefox and Safari are not
+     * based on Chromium.
+     *
+     * @returns {string} the accepted file extensions of the file uploader
+     */
+    get acceptedFileExtensions() {
+        const acceptedFileExtensions = this.props.acceptedFileExtensions;
+        if (!isAndroid() || isAndroidApp() || isBrowserFirefox() || isBrowserSafari()) {
+            return acceptedFileExtensions;
+        }
+        return acceptedFileExtensions
+            ? `${acceptedFileExtensions},${cameraHintMimetype}`
+            : cameraHintMimetype;
     }
 
     get rawCacheKey() {

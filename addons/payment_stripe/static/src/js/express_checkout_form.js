@@ -137,6 +137,13 @@ paymentExpressCheckoutForm.include({
                 this.paymentContext['expressCheckoutRoute'],
                 addresses,
             ));
+            // A falsy partner id means the flow was aborted because the address changed the fiscal
+            // position; reload so the updated prices and warning are shown before retrying.
+            if (!this.paymentContext.partnerId) {
+                ev.complete('fail');
+                window.location.reload();
+                return;
+            }
             // Call the transaction route to create the transaction and retrieve the client secret.
             const { client_secret } = await this.rpc(
                 this.paymentContext['transactionRoute'],
@@ -179,9 +186,13 @@ paymentExpressCheckoutForm.include({
                         },
                     },
                 );
-                if (availableCarriers.length === 0) {
+                const recomputedAmount = await this.rpc(
+                    this.paymentContext['shippingAddressUpdateRoute'] + '/compute_taxes',
+                );
+                if (availableCarriers.length === 0 || recomputedAmount.external_tax_error) {
                     ev.updateWith({status: 'invalid_shipping_address'});
                 } else {
+                    this.paymentContext['minorAmount'] = recomputedAmount;
                     ev.updateWith({
                         status: 'success',
                         shippingOptions: availableCarriers.map(carrier => ({
