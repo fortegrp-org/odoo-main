@@ -986,12 +986,6 @@ Attempting to double-book your time off won't magically make your vacation 2x be
         if 'active' in values and not self.env.context.get('from_cancel_wizard'):
             raise UserError(_("You can't manually archive/unarchive a time off."))
 
-        is_officer = self.env.user.has_group('hr_holidays.group_hr_holidays_user') or self.env.is_superuser()
-        if not is_officer and values.keys() - {'attachment_ids', 'supported_attachment_ids', 'message_main_attachment_id'}:
-            if any(hol.date_from.date() < fields.Date.today() and hol.employee_id.leave_manager_id != self.env.user
-                   and hol.state not in ('confirm', 'draft') for hol in self):
-                raise UserError(_('You must have manager rights to modify/validate a time off that already begun'))
-
         # Unlink existing resource.calendar.leaves for validated time off
         if 'state' in values and values['state'] != 'validate':
             validated_leaves = self.filtered(lambda l: l.state == 'validate')
@@ -1031,8 +1025,6 @@ Attempting to double-book your time off won't magically make your vacation 2x be
             for hol in self:
                 if hol.state not in ['draft', 'confirm', 'validate1']:
                     raise UserError(error_message % state_description_values.get(self[:1].state))
-                if hol.date_from.date() < now:
-                    raise UserError(_('You cannot delete a time off which is in the past'))
                 if hol.sudo().employee_ids and not hol.employee_id:
                     raise UserError(_('You cannot delete a time off assigned to several employees'))
         else:
