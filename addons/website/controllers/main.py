@@ -329,7 +329,7 @@ class Website(Home):
         if not qs or qs.lower() in '/website/info':
             yield {'loc': '/website/info'}
 
-    @http.route('/website/info', type='http', auth="public", website=True, sitemap=sitemap_website_info)
+    # @http.route('/website/info', type='http', auth="public", website=True, sitemap=sitemap_website_info)
     def website_info(self, **kwargs):
         Module = request.env['ir.module.module'].sudo()
         apps = Module.search([('state', '=', 'installed'), ('application', '=', True)])
